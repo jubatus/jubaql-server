@@ -1,0 +1,26 @@
+*.class
+*.log
+
+# sbt specific
+dist/*
+target/
+lib_managed/
+src_managed/
+project/boot/
+project/plugins/project/
+
+# Scala-IDE specific
+.scala_dependencies
+.idea
+
+# emacs specific
+*~
+
+# auto-generated files
+processor/start-script/run
+
+# config files
+core-site.xml
+hdfs-site.xml
+yarn-site.xml
+kafka.xml

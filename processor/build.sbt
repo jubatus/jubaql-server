@@ -1,9 +1,11 @@
 import com.typesafe.sbt.SbtStartScript
 import java.io.File
 
+import org.apache.ivy.core.module.descriptor.ExcludeRule
+
 name := "JubaQL Processor"
 
-version := "1.2.0"
+version := "1.3.0"
 
 // use 2.10 for now (Spark has no 2.11 support yet)
 scalaVersion := "2.10.4"
@@ -20,16 +22,19 @@ resolvers += "Cloudera Repository" at "https://repository.cloudera.com/artifacto
 // Add msgpack repository (sbt does not use the information provided in the Jubatus POM)
 resolvers += "MessagePack" at "http://msgpack.org/maven2"
 
+// local repository
+resolvers += Resolver.file("LocalRepo", file(Path.userHome.absolutePath + "/.ivy2/local"))(Resolver.ivyStylePatterns)
+
 libraryDependencies ++= Seq(
   // logging
   "com.typesafe.scala-logging" %% "scala-logging-slf4j"    % "2.1.2",
-  "org.slf4j"                  %  "slf4j-api"              % "1.7.7",
-  "org.slf4j"                  %  "slf4j-log4j12"          % "1.7.7",
+  "org.slf4j"                  %  "slf4j-api"              % "1.6.4",
+  "org.slf4j"                  %  "slf4j-log4j12"          % "1.6.4",
   // Jubatus
-  "us.jubat"                   % "jubatus"                 % "0.6.0"
+  "us.jubat"                   % "jubatus"                 % "0.7.1"
             exclude("org.jboss.netty", "netty"),
   // jubatusonyarn
-  "us.jubat"                   %% "jubatus-on-yarn-client"    % "1.0"
+  "us.jubat"                   %% "jubatus-on-yarn-client"    % "1.1"
             exclude("javax.servlet", "servlet-api")
             exclude("org.jboss.netty", "netty"),
   // HTTP server
@@ -39,25 +44,24 @@ libraryDependencies ++= Seq(
   // parsing of program arguments
   "com.github.scopt"           %% "scopt"                  % "3.2.0",
   // Spark
-  "org.apache.spark"           %% "spark-core"             % "1.1.1" % "provided",
-  // the following will prevent org.spark-project.akka:akka-remote_2.10:2.2.3-shaded-protobuf
-  // from pulling in io.netty:netty:3.6.6.Final, but it will not prevent spark-core
-  // itself to pull in io.netty:netty-all:4.0.23.Final (note that the former
-  // includes the package "org.jboss.netty", while the latter includes "io.netty".)
-  "org.spark-project.akka"     %% "akka-remote"            % "2.2.3-shaded-protobuf"
-            exclude("io.netty", "netty"),
-  "org.apache.spark"           %% "spark-streaming"        % "1.1.1" % "provided",
-  "org.apache.spark"           %% "spark-streaming-kafka"  % "1.1.1"
+  "org.apache.spark"           %% "spark-core"             % "1.2.2" % "provided"
+            excludeAll(ExclusionRule(organization = "org.slf4j")),
+  "org.apache.spark"           %% "spark-streaming"        % "1.2.2" % "provided",
+  "org.apache.spark"           %% "spark-streaming-kafka"  % "1.2.2"
+            exclude("org.apache.spark", "spark-streaming_2.10")
             exclude("commons-beanutils", "commons-beanutils")
             exclude("commons-collections", "commons-collections")
             exclude("com.esotericsoftware.minlog", "minlog"),
-  "org.apache.spark"           %% "spark-sql"              % "1.1.1",
+  "org.apache.spark"           %% "spark-sql"              % "1.2.2"
+            exclude("org.apache.spark", "spark-core_2.10"),
   // registration with the gateway
   "net.databinder.dispatch"    %% "dispatch-core"          % "0.11.2",
-  // HDFS
-  "org.apache.hadoop"          % "hadoop-client"           % "2.5.0-cdh5.2.0" % "provided",
+  // math
+  "org.apache.commons"         %  "commons-math3"          % "3.5",
   // for testing
   "org.scalatest"              %% "scalatest"              % "2.2.1"   % "test",
+  "org.scalacheck"             %% "scalacheck"             % "1.12.1"  % "test",
+  "org.subethamail"            %  "subethasmtp"            % "3.1.7"   % "test",
   "net.databinder"             %% "unfiltered-filter"      % "0.8.2"   % "test",
   "net.databinder"             %% "unfiltered-json4s"      % "0.8.2"   % "test",
   "net.databinder"             %% "unfiltered-netty-server" % "0.8.2"  % "test"

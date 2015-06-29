@@ -1,6 +1,6 @@
 name := "JubaQL Gateway"
 
-version := "1.2.0"
+version := "1.3.0"
 
 // use an older version than necessary to use the same set of dependencies
 // across projects

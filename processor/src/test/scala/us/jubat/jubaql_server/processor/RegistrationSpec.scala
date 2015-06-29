@@ -59,12 +59,15 @@ class RegistrationSpec extends FlatSpec with Matchers with MockServer {
     (logger, stdoutBuffer, stderrBuffer)
   }
 
+  import ProcessUtil.commandToProcessBuilder
+
   // First, check for invalid input
 
   "Passing an invalid string as URL" should "print an error and exit" taggedAs (LocalTest) in {
     val command = Seq("./start-script/run", "xyz")
+    val pb = commandToProcessBuilder(command)
     val (logger, stdoutBuffer, stderrBuffer) = getProcessLogger()
-    val exitCode = command ! logger
+    val exitCode = pb ! logger
     // check exit code and console output
     exitCode shouldBe 1
     stdoutBuffer.toString should include("invalid URL provided")
@@ -73,8 +76,9 @@ class RegistrationSpec extends FlatSpec with Matchers with MockServer {
   "Passing an URL of a non-existing server" should "print an error and exit" in {
     // start the client and specify a server that does (probably) not exist
     val command = Seq("./start-script/run", "http://lameiq2elakliajdlawkidl.jp/hoge")
+    val pb = commandToProcessBuilder(command)
     val (logger, stdoutBuffer, stderrBuffer) = getProcessLogger()
-    val exitCode = command ! logger
+    val exitCode = pb ! logger
     // check exit code and console output
     exitCode shouldBe 1
     stdoutBuffer.toString should include("registration failed: " +
@@ -120,9 +124,10 @@ class RegistrationSpec extends FlatSpec with Matchers with MockServer {
 
   "Passing the URL of a gateway-like server" should "register there" taggedAs (LocalTest) in {
     val command = Seq("./start-script/run", "http://localhost:9877/test/reg1")
+    val pb = commandToProcessBuilder(command)
     val (logger, stdoutBuffer, stderrBuffer) = getProcessLogger()
     // run the command
-    val process = command run logger
+    val process = pb run logger
     var submittedJson: Option[JValue] = None
     var waitedTime = 0
     // wait until we receive data or reach timeout
@@ -145,9 +150,10 @@ class RegistrationSpec extends FlatSpec with Matchers with MockServer {
 
   it should "unregister after receiving SIGTERM" taggedAs (LocalTest) in {
     val command = Seq("./start-script/run", "http://localhost:9877/test/unreg1")
+    val pb = commandToProcessBuilder(command)
     val (logger, stdoutBuffer, stderrBuffer) = getProcessLogger()
     // run the command
-    val process = command run logger
+    val process = pb run logger
     // wait until registration is complete
     var waitedTime = 0
     while (registerData.get("unreg1").isEmpty && waitedTime < 20000) {

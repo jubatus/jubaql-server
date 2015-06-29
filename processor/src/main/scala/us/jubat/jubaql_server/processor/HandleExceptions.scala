@@ -30,6 +30,8 @@ class HandleExceptions
     // `handle` asynchronously handles exceptions.
     service(request) handle {
       case error =>
+        logger.error(error.toString)
+        logger.error(error.getMessage)
         logger.error(error.getStackTraceString)
         val statusCode = HttpResponseStatus.INTERNAL_SERVER_ERROR
         val body = ("result" -> error.getMessage)

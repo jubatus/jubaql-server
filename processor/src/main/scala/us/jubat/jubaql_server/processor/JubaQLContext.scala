@@ -13,6 +13,9 @@
 // You should have received a copy of the GNU Lesser General Public
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
-package us.jubat.jubaql_server.processor.json
+package us.jubat.jubaql_server.processor
 
-case class DatumResult(string_values: Map[String, String], num_values: Map[String, Double])
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.SQLContext
+
+class JubaQLContext(sc: SparkContext, @transient val parser: JubaQLParser) extends SQLContext(sc)

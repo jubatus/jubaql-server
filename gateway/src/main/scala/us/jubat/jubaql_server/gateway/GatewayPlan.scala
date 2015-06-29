@@ -39,7 +39,8 @@ import java.nio.file.{StandardCopyOption, Files}
 @io.netty.channel.ChannelHandler.Sharable
 class GatewayPlan(ipAddress: String, port: Int,
                   envpForProcessor: Array[String], runMode: RunMode,
-                  sparkDistribution: String, fatjar: String)
+                  sparkDistribution: String, fatjar: String,
+                  checkpointDir: String)
   extends cycle.Plan
   /* With cycle.SynchronousExecution, there is a group of N (16?) threads
      (named "nioEventLoopGroup-5-*") that will process N requests in
@@ -77,7 +78,7 @@ class GatewayPlan(ipAddress: String, port: Int,
    */
   val tmpLog4jPath: String = try {
     val jar = new JarFile(new File(fatjar))
-    val log4jFile = jar.getEntry("log4j.xml")
+    val log4jFile = jar.getEntry("log4j-spark-submit.xml")
     val log4jIs = jar.getInputStream(log4jFile)
     val tmpFile = File.createTempFile("log4j", ".xml")
     Files.copy(log4jIs, tmpFile.toPath, StandardCopyOption.REPLACE_EXISTING)
@@ -88,7 +89,7 @@ class GatewayPlan(ipAddress: String, port: Int,
       logger.error("failed to create temporary log4j.xml copy: " + e.getMessage)
       throw e
   }
-  logger.debug("extracted log4j.xml file to %s".format(tmpLog4jPath))
+  logger.debug("extracted log4j-spark-submit.xml file to %s".format(tmpLog4jPath))
 
   val errorMsgContentType = ContentType("text/plain; charset=utf-8")
 
@@ -131,7 +132,8 @@ class GatewayPlan(ipAddress: String, port: Int,
           // double-escaped on their way to the Spark driver and probably never end
           // up there.
           cmd.update(6, "spark.driver.extraJavaOptions=-Drun.mode=production " +
-            s"-Djubaql.zookeeper=$zookeeper") // --conf
+            s"-Djubaql.zookeeper=$zookeeper " +
+            s"-Djubaql.checkpointdir=$checkpointDir") // --conf
           // also specify the location of the Spark jar file, if given
           val sparkJarParams = sparkJar match {
             case Some(url) => "--conf" :: s"spark.yarn.jar=$url" :: Nil
@@ -152,7 +154,7 @@ class GatewayPlan(ipAddress: String, port: Int,
               val isr = new InputStreamReader(is)
               val br = new BufferedReader(isr)
               var line: String = br.readLine()
-              while (line != null && line.trim != "yarnAppState: RUNNING") {
+              while (line != null && !line.trim.contains("state: RUNNING")) {
                 if (line.contains("Exception")) {
                   logger.error(line)
                   throw new RuntimeException("could not start spark-submit")
@@ -167,6 +169,7 @@ class GatewayPlan(ipAddress: String, port: Int,
         case RunMode.Development(numThreads) =>
           cmd.update(4, s"local[$numThreads]") // --master
           cmd.update(6, "run.mode=development") // --conf
+          cmd.insertAll(7, Seq("--conf", s"jubaql.checkpointdir=$checkpointDir"))
           logger.debug("executing: " + cmd.mkString(" "))
 
           Try {

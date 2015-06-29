@@ -15,4 +15,4 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 package us.jubat.jubaql_server.processor.json
 
-case class ClassifierResult(predictions: List[ClassifierPrediction])
+case class ErrorMessage(result: String)

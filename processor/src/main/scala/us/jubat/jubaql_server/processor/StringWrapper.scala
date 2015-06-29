@@ -15,4 +15,7 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 package us.jubat.jubaql_server.processor
 
+/**
+ * Created by tgp on 11/5/14.
+ */
 case class StringWrapper(value: String)

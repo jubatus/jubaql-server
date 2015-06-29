@@ -15,4 +15,17 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 package us.jubat.jubaql_server.processor.json
 
-case class ClassifierPrediction(label: String, score: Double)
+// We use a sealed trait to make sure we have all possible
+// response types in *this* file.
+sealed trait JubaQLResponse
+
+case class StatementProcessed(result: String)
+  extends JubaQLResponse
+
+case class AnalyzeResultWrapper(result: AnalyzeResult)
+  extends JubaQLResponse
+
+case class StatusResponse(result: String,
+  sources: Map[String, String],
+  models: Map[String, String])
+  extends JubaQLResponse

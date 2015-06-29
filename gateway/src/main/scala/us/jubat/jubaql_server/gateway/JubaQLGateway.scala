@@ -80,17 +80,13 @@ object JubaQLGateway extends LazyLogging {
     }
     logger.info("Starting in run mode %s".format(runMode))
 
-    val sparkDistribution: String = System.getProperty("spark.distribution")
-    if (sparkDistribution == null || sparkDistribution.trim.isEmpty) {
-      System.err.println("No spark.distribution property")
-      System.exit(1)
-    }
-    val fatjar: String = System.getProperty("jubaql.processor.fatjar")
-    if (fatjar == null || fatjar.trim.isEmpty) {
-      System.err.println("No jubaql.processor.fatjar")
-      System.exit(1)
-    }
-    val plan = new GatewayPlan(ipAddress, port, envp, runMode, sparkDistribution, fatjar)
+    val sparkDistribution: String = getPropertyOrExitIfEmpty("spark.distribution")
+    val fatjar: String = getPropertyOrExitIfEmpty("jubaql.processor.fatjar")
+    val checkpointDir = getCheckpointDir(runMode)
+    val plan = new GatewayPlan(ipAddress, port, envp, runMode,
+                               sparkDistribution = sparkDistribution,
+                               fatjar = fatjar,
+                               checkpointDir = checkpointDir)
     val nettyServer = unfiltered.netty.Server.http(port).plan(plan)
     logger.info("JubaQLGateway starting")
     nettyServer.run()
@@ -113,6 +109,29 @@ object JubaQLGateway extends LazyLogging {
     }
 
     parser.parse(args, CommandlineOptions())
+  }
+
+  private def getPropertyOrExitIfEmpty(name: String): String = {
+    val prop = scala.util.Properties.propOrElse(name, "")
+    if (prop.trim.isEmpty) {
+      System.err.println(s"No ${name} property")
+      System.exit(1)
+    }
+    prop
+  }
+
+  private def getCheckpointDir(runMode: RunMode): String = {
+    val dir = scala.util.Properties.propOrElse("jubaql.checkpointdir", "")
+    if (dir.trim.isEmpty) {
+      runMode match {
+        case RunMode.Production(_, _, _, _) =>
+          "hdfs:///tmp/spark"
+        case RunMode.Development(_) =>
+          "file:///tmp/spark"
+      }
+    } else {
+      dir
+    }
   }
 }
 

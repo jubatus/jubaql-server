@@ -20,7 +20,7 @@ import dispatch._
 import dispatch.Defaults._
 import org.json4s.DefaultFormats
 import org.json4s.native.Serialization
-import jubaql.gateway.json.{Unregister, Register}
+import us.jubat.jubaql_server.processor.json.{Unregister, Register}
 import scala.util.{Failure, Success, Try}
 
 class RegistrationHandler(val registerUrl: String) extends LazyLogging {

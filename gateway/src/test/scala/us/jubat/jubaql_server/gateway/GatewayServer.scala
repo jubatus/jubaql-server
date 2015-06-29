@@ -22,7 +22,9 @@ trait GatewayServer extends BeforeAndAfterAll {
 
   protected val plan = new GatewayPlan("example.com", 1234,
                                        Array(), RunMode.Test,
-                                       "", "src/test/resources/processor-logfile.jar")
+                                       sparkDistribution = "",
+                                       fatjar = "src/test/resources/processor-logfile.jar",
+                                       checkpointDir = "file:///tmp/spark")
   protected val server = unfiltered.netty.Server.http(9877).plan(plan)
 
   override protected def beforeAll() = {

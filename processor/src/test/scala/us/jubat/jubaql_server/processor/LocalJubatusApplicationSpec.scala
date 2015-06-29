@@ -145,6 +145,29 @@ class LocalJubatusApplicationSpec extends FlatSpec with ShouldMatchers {
     }
   }
 
+  it should "be startable twice" taggedAs (LocalTest, JubatusTest) in {
+    val f1 = LocalJubatusApplication.start("bar", LearningMachineType.Classifier, classifierConfig)
+    Await.ready(f1, Duration.Inf)
+    val result1 = f1.value.get
+    val f2 = LocalJubatusApplication.start("bar", LearningMachineType.Classifier, classifierConfig)
+    Await.ready(f2, Duration.Inf)
+    val result2 = f2.value.get
+    result1 shouldBe a[Success[_]]
+    result2 shouldBe a[Success[_]]
+    result1.get.jubatusProxy.port shouldBe 9199
+    result2.get.jubatusProxy.port shouldBe 9200
+    result1 match {
+      case Success(app) =>
+        Await.ready(app.stop(), Duration.Inf)
+      case _ =>
+    }
+    result2 match {
+      case Success(app) =>
+        Await.ready(app.stop(), Duration.Inf)
+      case _ =>
+    }
+  }
+
   "jubarecommender" should "start" taggedAs (LocalTest, JubatusTest) in {
     val f = LocalJubatusApplication.start("baz", LearningMachineType.Recommender, recommenderConfig)
     Await.ready(f, Duration.Inf)

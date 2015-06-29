@@ -38,3 +38,6 @@ object HDFSTest extends Tag("jubaql.HDFSTest")
 
 // used for tests that use a Kafka installation in some network
 object KafkaTest extends Tag("jubaql.KafkaTest")
+
+// can be used to run just one single test
+object JustThisTest extends Tag("jubaql.JustThisTest")

@@ -15,6 +15,8 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 package us.jubat.jubaql_server.processor
 
+import RunMode.Development
+
 import scala.concurrent.future
 import scala.concurrent.ExecutionContext.Implicits.global
 import org.apache.spark.SparkContext
@@ -40,10 +42,21 @@ import org.json4s.native.JsonMethods._
 // "struct" holding the number of processed items, runtime in ms and largest seen id
 case class ProcessingInformation(itemCount: Long, runtime: Long, maxId: Option[String])
 
+// an object describing the state of the processor
+sealed trait ProcessorState
+
+case object Initialized extends ProcessorState
+
+case object Running extends ProcessorState
+
+case object Finished extends ProcessorState
+
 class HybridProcessor(sc: SparkContext,
                       sqlc: SQLContext,
                       storageLocation: String,
-                      streamLocations: List[String])
+                      streamLocations: List[String],
+                      runMode: RunMode = RunMode.Development,
+                      checkpointDir: String = "file:///tmp/spark")
   extends LazyLogging {
   /*
    * We want to do processing of static data first, then continue with
@@ -92,12 +105,18 @@ class HybridProcessor(sc: SparkContext,
   else
     logger.warn("could not extract number of cores from run command: " + _runCmd)
 
-  // define the formats that we can use
+  /// define the STORAGE sources that we can use
+  // a file in the local file system (must be accessible by all executors)
   val fileRe = """file://(.+)""".r
+  // a file in HDFS
   val hdfsRe = """(hdfs://.+)""".r
-  val kafkaRe = """kafka://([^/]+)/([^/]+)/([^/]+)$""".r
-  val dummyRe = """^dummy(.?)""".r
+  // an empty data set
   val emptyRe = """^empty(.?)""".r
+  /// define the STREAM sources that we can use
+  // a Kafka message broker (host:port/topic/groupid)
+  val kafkaRe = """kafka://([^/]+)/([^/]+)/([^/]+)$""".r
+  // endless dummy JSON data
+  val dummyRe = """^dummy(.?)""".r
   val validStaticLocations: List[Regex] = emptyRe :: fileRe :: hdfsRe :: Nil
   val validStreamLocations: List[Regex] = dummyRe :: kafkaRe :: Nil
 
@@ -127,13 +146,29 @@ class HybridProcessor(sc: SparkContext,
   // Flag that stores whether user stopped data processing manually
   protected var userStoppedProcessing = false
 
+  // state of the processor
+  protected var _state: ProcessorState = Initialized
+
+  protected def setState(newState: ProcessorState) = synchronized {
+    _state = newState
+  }
+
+  def state: ProcessorState = synchronized {
+    _state
+  }
+
   /**
-   * Start hybrid processing using the given transformation.
+   * Start hybrid processing using the given RDD[JValue] operation.
    *
-   * @param transform an RDD operation that will be performed on each batch
+   * The stream data will be parsed into a JValue (if possible) and the
+   * transformation is expected to act on the resulting RDD[JValue].
+   * Note that *as opposed to* the `start(SchemaRDD => SchemaRDD)` version,
+   * if the input RDD is empty, the function will still be executed.
+   *
+   * @param process an RDD operation that will be performed on each batch
    * @return one function to stop processing and one to get the highest IDs seen so far
    */
-  def start(transform: RDD[JValue] => RDD[_]): (() => (ProcessingInformation, ProcessingInformation),
+  def startJValueProcessing(process: RDD[JValue] => Unit): (() => (ProcessingInformation, ProcessingInformation),
     () => Option[IdType]) = {
     val parseJsonStringIntoOption: (String => Traversable[JValue]) = line => {
       val maybeJson = parseOpt(line)
@@ -143,54 +178,132 @@ class HybridProcessor(sc: SparkContext,
       }
       maybeJson
     }
-    val parseAndTransform: RDD[String] => RDD[Unit] = rdd => {
-      transform(rdd.flatMap(parseJsonStringIntoOption)).map(_ => ())
-    }
-    _start(parseAndTransform)
+    // parse DStream[String] into DStream[JValue] item by item,
+    // skipping unparseable strings
+    val parseJsonDStream = (stream: DStream[String]) =>
+      stream.flatMap(parseJsonStringIntoOption)
+    val processJsonDStream: DStream[JValue] => Unit =
+      _.foreachRDD(process)
+    // start processing
+    _start(parseJsonDStream, processJsonDStream)
   }
 
   /**
-   * Start hybrid processing using the given transformation.
+   * Start hybrid processing using the given SchemaRDD operation.
    *
-   * @param transform an RDD operation that will be performed on each batch
+   * The stream data will be equipped with a schema (either as passed
+   * as a parameter or as inferred by `SQLContext.jsonRDD()`) and the
+   * operation is expected to act on the resulting SchemaRDD.
+   * Note that if the RDD is empty, the given function will not be
+   * executed at all (not even with an empty RDD as a parameter).
+   *
+   * @param process an RDD operation that will be performed on each batch
    * @return one function to stop processing and one to get the highest IDs seen so far
    */
-  def start(transform: SchemaRDD => SchemaRDD,
+  def startTableProcessing(process: SchemaRDD => Unit,
             schema: Option[StructType]): (() => (ProcessingInformation, ProcessingInformation),
     () => Option[IdType]) = {
-    val parseAndTransform: RDD[String] => RDD[Unit] = rdd => {
-      // with an empty RDD, we cannot infer the schema (it will raise an exception)
-      if (rdd.count() > 0) {
-        // parse with schema or infer if not given
-        val jsonRdd = schema.map(sqlc.jsonRDD(rdd, _)).getOrElse(sqlc.jsonRDD(rdd, 0.1))
-        transform(jsonRdd).map(_ => ())
-      } else {
-        // create an (empty) SchemaRDD
-        rdd.map(_ => ())
-      }
+    // parse DStream[String] into a row/column shaped stream
+    val parseJson: DStream[String] => SchemaDStream = schema match {
+      case Some(givenSchema) =>
+        SchemaDStream.fromStringStreamWithSchema(sqlc, _, givenSchema, None)
+      case None =>
+        SchemaDStream.fromStringStream(sqlc, _, None)
     }
-    _start(parseAndTransform)
+    // We must only execute the process function if the RDD is non-empty.
+    // For inferred schema method, if the RDD is empty then the schema
+    // will be empty, too. For given schema method, we have to check
+    // the actual count (which is more expensive).
+    val processIfNotEmpty: SchemaRDD => Unit = schema match {
+      case Some(givenSchema) =>
+        rdd => if (rdd.count() > 0) process(rdd)
+      case None =>
+        rdd => if (rdd.schema.fields.size > 0) process(rdd)
+    }
+    val processStream: SchemaDStream => Unit =
+      _.foreachRDD(processIfNotEmpty)
+    _start[SchemaDStream](parseJson, processStream)
   }
 
   /**
-   * Start hybrid processing using the given transformation.
+   * Start hybrid processing using the given SchemaRDD operation.
    *
-   * @param parseAndTransform an RDD operation that will be performed on each batch
+   * The stream data will be equipped with a schema (either as passed
+   * as a parameter or as inferred by `SQLContext.jsonRDD()`) and the
+   * operation is expected to act on the resulting SchemaDStream.
+   * The function is responsible for triggering output operations.
+   *
+   * @param process a function to transform and operate on the main DStream
    * @return one function to stop processing and one to get the highest IDs seen so far
    */
-  protected def _start(parseAndTransform: RDD[String] => RDD[Unit]):
+  def startTableProcessingGeneral(process: SchemaDStream => Unit,
+                                  schema: Option[StructType],
+                                  inputStreamName: String): (() => (ProcessingInformation,
+    ProcessingInformation), () => Option[IdType]) = {
+    // parse DStream[String] into a row/column shaped stream
+    val parseJson: DStream[String] => SchemaDStream = schema match {
+      case Some(givenSchema) =>
+        SchemaDStream.fromStringStreamWithSchema(sqlc, _, givenSchema, Some(inputStreamName))
+      case None =>
+        SchemaDStream.fromStringStream(sqlc, _, Some(inputStreamName))
+    }
+    _start[SchemaDStream](parseJson, process)
+  }
+
+  /**
+   * Start hybrid processing using the given operation.
+   *
+   * The function passed in must operate on an RDD[String] (the stream data
+   * to be processed in a single batch), where each item of the RDD can be
+   * assumed to be JSON-encoded. The function *itself* is responsible to
+   * start computation (e.g. by using `rdd.foreach()` or `rdd.count()`).
+   * As that function can do arbitrary (nested and chained) processing, the
+   * notion of "number of processed items" makes only limited sense; we
+   * work with the "number of input items" instead.
+   *
+   * @param parseJson a function to get the input stream into something processable,
+   *                  like `DStream[String] => DStream[JValue]` or
+   *                  `DStream[String] => SchemaDStream`. "processable" means
+   *                  that there is a `foreachRDD()` method matching the
+   *                  parameter type of the `process()` function.
+   *                  (This is applied duck typing!)
+   * @param process the actual operations on the parsed data stream. Note that
+   *                this function is responsible for calling an output operation.
+   * @tparam T the type of RDD that the parsed stream will allow processing on,
+   *           like `RDD[JValue]` or `SchemaRDD`
+   * @return one function to stop processing and one to get the highest IDs seen so far
+   */
+  protected def _start[T](parseJson: DStream[String] => T,
+                          process: T => Unit):
   (() => (ProcessingInformation, ProcessingInformation), () => Option[IdType]) = {
+    if (state != Initialized) {
+      val msg = "processor cannot be started in state " + state
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+    setState(Running)
     logger.debug("creating StreamingContext for static data")
+    /* In order for updateStreamByKey() to work, we need to enable RDD checkpointing
+     * by setting a checkpoint directory. Note that this is different from enabling
+     * Streaming checkpointing (which would be needed for driver fault-tolerance),
+     * which would require the whole state of the application (in particular, all
+     * functions in stream.foreachRDD(...) calls) to be serializable. This would
+     * mean a rewrite of large parts of code, if it is possible at all.
+     * Also see <https://www.mail-archive.com/user%40spark.apache.org/msg22150.html>.
+     */
+    sc.setCheckpointDir(checkpointDir)
     ssc_ = new StreamingContext(sc, Seconds(2))
 
     // this has to match our jubaql_timestamp inserted by fluentd
-    val extractRe = """.+"jubaql_timestamp": ?"([0-9\-:.T]+)".*""".r
+    val timestampInJsonRe = """ *"jubaql_timestamp": ?"([0-9\-:.T]+)" *""".r
 
+    // Extract a jubaql_timestamp field from a JSON-shaped string and return it.
     val extractId: String => IdType = item => {
-      item match {
-        case extractRe(idString) =>
-          idString
-        case _ =>
+      timestampInJsonRe.findFirstMatchIn(item) match {
+        case Some(aMatch) =>
+          val id = aMatch.group(1)
+          id
+        case None =>
           ""
       }
     }
@@ -257,13 +370,15 @@ class HybridProcessor(sc: SparkContext,
       logger.debug("not repartitioning")
       staticData
     }
+    // first find the maximal ID in the data and count it
     repartitionedData.map(item => {
+      val id = extractId(item)
       // update maximal ID
-      maxStaticId += Some(extractId(item))
-      item
-    }).transform(parseAndTransform).foreachRDD(rdd => {
+      maxStaticId += Some(id)
+      id
+    }).foreachRDD(rdd => {
       val count = rdd.count()
-      // we count the number of total processed rows (on the driver)
+      // we count the number of total input rows (on the driver)
       countStatic += count
       // stop processing of static data if there are no new files
       if (count == 0) {
@@ -275,6 +390,9 @@ class HybridProcessor(sc: SparkContext,
         logger.info(s"processed $count (static) lines")
       }
     })
+    // now do the actual processing
+    val mainStream = parseJson(repartitionedData)
+    process(mainStream)
 
     // start first StreamingContext
     logger.info("starting static data processing")
@@ -315,7 +433,7 @@ class HybridProcessor(sc: SparkContext,
       } else {
         logger.warn("static data processing ended, but did not complete")
       }
-      staticStreamingContext.stop(false, true)
+      staticStreamingContext.stop(stopSparkContext = false, stopGracefully = true)
       logger.debug("bye from thread to wait for completion of static processing")
     } onFailure {
       case error: Throwable =>
@@ -326,7 +444,6 @@ class HybridProcessor(sc: SparkContext,
     future {
       // NB. This is a separate thread. In functions that will be serialized,
       // you cannot necessarily use variables from outside this thread.
-      // Also see <http://mail-archives.apache.org/mod_mbox/spark-user/201501.mbox/%3CCANGvG8pf+ukzLi38hjVeV91BVW0zgEFB4KX2niK+BW55M_zNFw@mail.gmail.com%3E>.
       val localExtractId = extractId
       val localCountStream = countStream
       val localMaxStreamId = maxStreamId
@@ -340,6 +457,16 @@ class HybridProcessor(sc: SparkContext,
       staticRunTime = System.currentTimeMillis() - staticStartTime
       logger.debug("static processing ended after %d items and %s ms, largest seen ID: %s".format(
         countStatic.value, staticRunTime, largestStaticItemId))
+      logger.debug("sleeping a bit to allow Spark to settle")
+      runMode match {
+        case Development =>
+          Thread.sleep(200)
+        case _ =>
+          // If we don't sleep long enough here, then old/checkpointed RDDs
+          // won't be cleaned up in time before the next process starts. For
+          // some reason, this happens only with YARN.
+          Thread.sleep(8000)
+      }
       if (staticProcessingComplete && !userStoppedProcessing) {
         logger.info("static processing completed successfully, setting up stream")
         streamLocations match {
@@ -347,11 +474,15 @@ class HybridProcessor(sc: SparkContext,
             // set up stream processing
             logger.debug("creating StreamingContext for stream data")
             ssc_ = new StreamingContext(sc, Seconds(2))
-            val allStreamData: DStream[String] = streamLocation match {
+            val allStreamData: DStream[(IdType, String)] = (streamLocation match {
               case dummyRe(nothing) =>
-                // dummy JSON data emitted over and over
-                val dummyData = sc.parallelize("{\"id\": 5}" :: "{\"id\": 6}" ::
-                  "{\"id\": 7}" :: Nil)
+                // dummy JSON data emitted over and over (NB. the timestamp
+                // is not increasing over time)
+                val dummyData = sc.parallelize(
+                  """{"gender":"m","age":26,"jubaql_timestamp":"2014-11-21T15:52:21.943321112"}""" ::
+                    """{"gender":"f","age":24,"jubaql_timestamp":"2014-11-21T15:52:22"}""" ::
+                    """{"gender":"m","age":31,"jubaql_timestamp":"2014-11-21T15:53:21.12345"}""" ::
+                    Nil)
                 new ConstantInputDStream(ssc_, dummyData)
               case kafkaRe(zookeeper, topics, groupId) =>
                 // connect to the given Kafka instance and receive data
@@ -366,38 +497,41 @@ class HybridProcessor(sc: SparkContext,
                     // left for broadcast variables, so we cannot communicate
                     // our "runState = false" information.
                     StorageLevel.DISK_ONLY).map(_._2)
-            }
+            }).map(item => (localExtractId(item), item))
             val streamData = (largestStaticItemId match {
               case Some(largestId) =>
                 // only process items with a strictly larger id than what we
                 // have seen so far
                 logger.info("filtering for items with an id larger than " + largestId)
-                allStreamData.filter(item => {
-                  localExtractId(item) > largestId
+                allStreamData.filter(itemWithId => {
+                  itemWithId._1 > largestId
                 })
               case None =>
                 // don't do any ID filtering if there is no "largest id"
                 logger.info("did not see any items in static processing, " +
                   "processing whole stream")
                 allStreamData
-            }).map(item => {
+            }).map(itemWithId => {
               // remember the largest seen ID
-              localMaxStreamId += Some(localExtractId(item))
-              item
+              localMaxStreamId += Some(itemWithId._1)
+              itemWithId._2
             })
             logger.debug("stream data DStream: " + streamData)
-            streamData.transform(parseAndTransform).foreachRDD(rdd => {
-              // this `count` is *necessary* to trigger the (lazy) transformation!
+            streamData.foreachRDD(rdd => {
               val count = rdd.count()
               // we count the number of total processed rows (on the driver)
               localCountStream += count
               logger.info(s"processed $count (stream) lines")
             })
+            // now do the actual processing
+            val mainStream = parseJson(streamData)
+            process(mainStream)
             // start stream processing
             synchronized {
               if (userStoppedProcessing) {
                 logger.info("processing was stopped by user during stream setup, " +
                   "not starting")
+                setState(Finished)
               } else {
                 logger.info("starting stream processing")
                 streamStartTime = System.currentTimeMillis()
@@ -407,21 +541,26 @@ class HybridProcessor(sc: SparkContext,
           case Nil =>
             logger.info("not starting stream processing " +
               "(no stream source given)")
+            setState(Finished)
           case _ =>
             logger.error("not starting stream processing " +
               "(multiple streams not implemented)")
+            setState(Finished)
         }
       } else if (staticProcessingComplete && userStoppedProcessing) {
         logger.info("static processing was stopped by user, " +
           "not setting up stream")
+        setState(Finished)
       } else {
         logger.warn("static processing did not complete successfully, " +
           "not setting up stream")
+        setState(Finished)
       }
       logger.debug("bye from thread to start stream processing")
     } onFailure {
       case error: Throwable =>
         logger.error("Error while setting up stream processing", error)
+        setState(Finished)
     }
 
     // return a function to stop the data processing
@@ -431,7 +570,7 @@ class HybridProcessor(sc: SparkContext,
         userStoppedProcessing = true
       }
       logger.debug("now stopping the StreamingContext")
-      currentStreamingContext.stop(false, true)
+      currentStreamingContext.stop(stopSparkContext = false, stopGracefully = true)
       logger.debug("done stopping the StreamingContext")
       // if stream processing was not started or there was a runtime already
       // computed, we don't update the runtime
@@ -441,13 +580,31 @@ class HybridProcessor(sc: SparkContext,
       logger.info(("processed %s items in %s ms (static) and %s items in " +
         "%s ms (stream)").format(countStatic.value, staticRunTime,
           countStream.value, streamRunTime))
+      setState(Finished)
       (ProcessingInformation(countStatic.value, staticRunTime, maxStaticId.value),
         ProcessingInformation(countStream.value, streamRunTime, maxStreamId.value))
     }, () => maxStaticId.value)
   }
 
 
+  /**
+   * Allows the user to wait for termination of the processing.
+   * If an exception happens during processing, an exception will be thrown here.
+   */
   def awaitTermination() = {
-    ssc_.awaitTermination()
+    logger.debug("user is waiting for termination ...")
+    try {
+      ssc_.awaitTermination()
+      setState(Finished)
+    } catch {
+      case e: Throwable =>
+        logger.warn("StreamingContext threw an exception (\"%s\"), shutting down".format(
+          e.getMessage))
+        // when we got an exception, clean up properly
+        ssc_.stop(stopSparkContext = false, stopGracefully = true)
+        setState(Finished)
+        logger.info(s"streaming context was stopped after exception")
+        throw e
+    }
   }
 }

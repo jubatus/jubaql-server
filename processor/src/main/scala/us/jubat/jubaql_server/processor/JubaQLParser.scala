@@ -15,11 +15,62 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 package us.jubat.jubaql_server.processor
 
-import org.apache.spark.sql.catalyst.SqlParser
+import org.apache.spark.sql.catalyst.types.BooleanType
+import org.apache.spark.sql.catalyst.{SqlLexical, SqlParser}
+import org.apache.spark.sql.catalyst.analysis.{Star, UnresolvedAttribute, UnresolvedRelation}
+import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical._
 import com.typesafe.scalalogging.slf4j.LazyLogging
 
+import scala.util.parsing.input.CharArrayReader._
+
+// TODO: move these to a proper file.
+// TODO: rename to better ones.
+sealed trait FeatureFunctionParameters
+
+case object WildcardAnyParameter extends FeatureFunctionParameters
+
+case class WildcardWithPrefixParameter(prefix: String) extends FeatureFunctionParameters
+
+case class WildcardWithSuffixParameter(suffix: String) extends FeatureFunctionParameters
+
+case class NormalParameters(params: List[String]) extends FeatureFunctionParameters
+
+
 class JubaQLParser extends SqlParser with LazyLogging {
+
+  class JubaQLLexical(keywords: Seq[String]) extends SqlLexical(keywords) {
+    case class CodeLit(chars: String) extends Token {
+      override def toString = "$$"+chars+"$$"
+    }
+
+    // used for parsing $$-delimited code blocks
+    protected lazy val codeDelim: Parser[String] = '$' ~ '$' ^^
+      { case a ~ b => "$$" }
+
+    protected lazy val stringWithoutCodeDelim: Parser[String] = rep1( chrExcept('$', EofCh) ) ^^
+      { case chars => chars mkString "" }
+
+    protected lazy val codeContents: Parser[String] = repsep(stringWithoutCodeDelim, '$') ^^
+      { case words => words mkString "$" }
+
+    override lazy val token: Parser[Token] =
+      ( identChar ~ rep( identChar | digit ) ^^ { case first ~ rest => processIdent(first :: rest mkString "") }
+        | rep1(digit) ~ opt('.' ~> rep(digit)) ^^ {
+        case i ~ None    => NumericLit(i mkString "")
+        case i ~ Some(d) => FloatLit(i.mkString("") + "." + d.mkString(""))
+      }
+        | '\'' ~ rep( chrExcept('\'', EofCh) ) ~ '\'' ^^ { case '\'' ~ chars ~ '\'' => StringLit(chars mkString "") }
+        | '\"' ~ rep( chrExcept('\"', EofCh) ) ~ '\"' ^^ { case '\"' ~ chars ~ '\"' => StringLit(chars mkString "") }
+        | codeDelim ~> codeContents <~ codeDelim ^^ { case chars => CodeLit(chars) }
+        | EofCh ^^^ EOF
+        | codeDelim ~> failure("unclosed code literal")
+        | '\'' ~> failure("unclosed string literal")
+        | '\"' ~> failure("unclosed string literal")
+        | delim
+        | failure("illegal character")
+        )
+  }
 
   protected lazy val CREATE = Keyword("CREATE")
   protected lazy val DATASOURCE = Keyword("DATASOURCE")
@@ -32,19 +83,70 @@ class JubaQLParser extends SqlParser with LazyLogging {
   protected lazy val ANALYZE = Keyword("ANALYZE")
   protected lazy val USING = Keyword("USING")
   protected lazy val DATA = Keyword("DATA")
+  protected lazy val LOG = Keyword("LOG")
   protected lazy val STORAGE = Keyword("STORAGE")
   protected lazy val STREAM = Keyword("STREAM")
-  protected lazy val config = Keyword("config")
+  protected lazy val CONFIG = Keyword("CONFIG")
   protected lazy val numeric = Keyword("numeric")
   protected lazy val string = Keyword("string")
   protected lazy val boolean = Keyword("boolean")
+  protected lazy val STATUS = Keyword("STATUS")
   protected lazy val SHUTDOWN = Keyword("SHUTDOWN")
+  protected lazy val START = Keyword("START")
   protected lazy val STOP = Keyword("STOP")
   protected lazy val PROCESSING = Keyword("PROCESSING")
+  protected lazy val FUNCTION = Keyword("FUNCTION")
+  protected lazy val RETURNS = Keyword("RETURNS")
+  protected lazy val LANGUAGE = Keyword("LANGUAGE")
+  protected lazy val FEATURE = Keyword("FEATURE")
+  protected lazy val TRIGGER = Keyword("TRIGGER")
+  protected lazy val FOR = Keyword("FOR")
+  protected lazy val EACH = Keyword("EACH")
+  protected lazy val ROW = Keyword("ROW")
+  protected lazy val EXECUTE = Keyword("EXECUTE")
+  protected lazy val SLIDING = Keyword("SLIDING")
+  protected lazy val WINDOW = Keyword("WINDOW")
+  protected lazy val SIZE = Keyword("SIZE")
+  protected lazy val ADVANCE = Keyword("ADVANCE")
+  protected lazy val TIME = Keyword("TIME")
+  protected lazy val TUPLES = Keyword("TUPLES")
+  protected lazy val OVER = Keyword("OVER")
+
+  override val lexical = new JubaQLLexical(reservedWords)
+
+  // we should allow some common column names that have are also known as keywords
+  protected lazy val colIdent = (COUNT | TIME | STATUS | MODEL | GROUP |
+    ORDER | ident)
+
+  override lazy val baseExpression: PackratParser[Expression] =
+    expression ~ "[" ~ expression <~ "]" ^^ {
+      case base ~ _ ~ ordinal => GetItem(base, ordinal)
+    } |
+      TRUE ^^^ Literal(true, BooleanType) |
+      FALSE ^^^ Literal(false, BooleanType) |
+      cast |
+      "(" ~> expression <~ ")" |
+      function |
+      "-" ~> literal ^^ UnaryMinus |
+      colIdent ^^ UnresolvedAttribute | // was: ident
+      "*" ^^^ Star(None) |
+      literal
+
+  override lazy val projection: Parser[Expression] =
+    expression ~ (opt(AS) ~> opt(colIdent)) ^^ { // was: opt(ident)
+      case e ~ None => e
+      case e ~ Some(a) => Alias(e, a)()
+    }
+
+  protected lazy val streamIdent = ident
+
+  protected lazy val modelIdent = ident
+
+  protected lazy val funcIdent = ident
 
   // column_name column_type
   protected lazy val stringPairs: Parser[(String, String)] = {
-    ident ~ (numeric | string | boolean) ^^ {
+    colIdent ~ (numeric | string | boolean) ^^ {
       case x ~ y => (x, y)
     }
   }
@@ -62,7 +164,7 @@ class JubaQLParser extends SqlParser with LazyLogging {
 
   // CREATE DATASOURCE source_name ( column_name data_type, [...]) FROM sink_id
   protected lazy val createDatasource: Parser[JubaQLAST] = {
-    CREATE ~ DATASOURCE ~> ident ~ opt("(" ~ rep1sep(stringPairs, ",") ~ ")") ~
+    CREATE ~ DATASOURCE ~> streamIdent ~ opt("(" ~ rep1sep(stringPairs, ",") ~ ")") ~
       FROM ~ "(" ~ STORAGE ~ ":" ~ stringLit ~ opt(streamList) <~ ")" ^^ {
       case sourceName ~ rep ~ _ /*FROM*/ ~ _ ~ _ /*STORAGE*/ ~ _ ~ storage ~ streams =>
         rep match {
@@ -80,61 +182,138 @@ class JubaQLParser extends SqlParser with LazyLogging {
     }
   }
 
-  protected lazy val createWith: Parser[(String, List[String])] = {
-    ident ~ ":" ~ stringLit ^^ {
-      case key ~ _ ~ value =>
-        (key, List(value))
-    } |
-      ident ~ ":" ~ "[" ~ rep1sep(stringLit, ",") <~ "]" ^^ {
-        case key ~ _ ~ _ ~ values =>
-          (key, values)
-      }
-  }
-
-  // CREATE algorithm_name MODEL jubatus_name WITH config = "json string"
   protected lazy val createModel: Parser[JubaQLAST] = {
-    CREATE ~> jubatusAlgorithm ~ MODEL ~ ident ~ WITH ~ "(" ~ opt(rep1sep(createWith, ",")) ~ ")" ~ "config" ~ "=" ~ stringLit ^^ {
-      case algorithm ~ _ ~ modelName ~ _ /*with*/ ~ _ ~ cwith ~ _ ~ _ /*config*/ ~ _ ~ config =>
-        CreateModel(algorithm, modelName, config, cwith.getOrElse(List[(String, List[String])]()))
+    val wildcardAny: Parser[FeatureFunctionParameters] = "*" ^^ {
+      case _ =>
+        WildcardAnyParameter
+    }
+    val wildcardWithPrefixParam: Parser[FeatureFunctionParameters] = ident <~ "*" ^^ {
+      case prefix =>
+        WildcardWithPrefixParameter(prefix)
+    }
+    val wildcardWithSuffixParam: Parser[FeatureFunctionParameters] = "*" ~> ident ^^ {
+      case suffix =>
+        WildcardWithSuffixParameter(suffix)
+    }
+    // wildcardWithSuffixParam is first.
+    // If wildcardAny precedes, *_suffix always matches to wildcardAny.
+    val wildcard: Parser[FeatureFunctionParameters] = wildcardWithSuffixParam | wildcardAny | wildcardWithPrefixParam
+
+    val oneParameter: Parser[NormalParameters] = colIdent ^^ {
+      case param =>
+        NormalParameters(List(param))
+    }
+    // this may take one parameter. Should such behavior avoided?
+    val moreThanOneParameters: Parser[FeatureFunctionParameters] = "(" ~> rep1sep(colIdent, ",") <~ ")" ^^ {
+      case params =>
+        NormalParameters(params)
+    }
+
+    val featureFunctionParameters: Parser[FeatureFunctionParameters] = wildcard | oneParameter | moreThanOneParameters
+
+    val labelOrId: Parser[(String, String)] = "(" ~> ident ~ ":" ~ colIdent <~ ")" ^^ {
+      case labelOrId ~ _ ~ value if labelOrId == "label" || labelOrId == "id" =>
+        (labelOrId, value)
+    }
+
+    val paramsAndFunction: Parser[(FeatureFunctionParameters, String)] = featureFunctionParameters ~ opt(WITH ~> funcIdent) ^^ {
+      case params ~ functionName =>
+        (params, functionName.getOrElse("id"))
+    }
+
+    CREATE ~> jubatusAlgorithm ~ MODEL ~ modelIdent ~ opt(labelOrId) ~ AS ~
+      rep1sep(paramsAndFunction, ",") ~ CONFIG ~ stringLit ^^ {
+      case algorithm ~ _ ~ modelName ~ maybeLabelOrId ~ _ ~ l ~ _ ~ config =>
+        CreateModel(algorithm, modelName, maybeLabelOrId, l, config)
     }
   }
 
-  // This select copied from SqlParser, and removed `from` clause.
-  protected lazy val jubaqlSelect: Parser[LogicalPlan] =
-    SELECT ~> opt(DISTINCT) ~ projections ~
-      opt(filter) ~
-      opt(grouping) ~
-      opt(having) ~
-      opt(orderBy) ~
-      opt(limit) <~ opt(";") ^^ {
-      case d ~ p ~ f ~ g ~ h ~ o ~ l =>
-        val base = NoRelation
-        val withFilter = f.map(f => Filter(f, base)).getOrElse(base)
-        val withProjection =
-          g.map {
-            g =>
-              Aggregate(g, assignAliases(p), withFilter)
-          }.getOrElse(Project(assignAliases(p), withFilter))
-        val withDistinct = d.map(_ => Distinct(withProjection)).getOrElse(withProjection)
-        val withHaving = h.map(h => Filter(h, withDistinct)).getOrElse(withDistinct)
-        val withOrder = o.map(o => Sort(o, withHaving)).getOrElse(withHaving)
-        val withLimit = l.map {
-          l => Limit(l, withOrder)
-        }.getOrElse(withOrder)
-        withLimit
+  protected lazy val createStreamFromSelect: Parser[JubaQLAST] = {
+    CREATE ~ STREAM ~> streamIdent ~ FROM ~ select ^^ {
+      case streamName ~ _ ~ selectPlan =>
+        CreateStreamFromSelect(streamName, selectPlan)
     }
+  }
+
+  protected lazy val createStreamFromAnalyze: Parser[JubaQLAST] = {
+    CREATE ~ STREAM ~> streamIdent ~ FROM ~ analyzeStream ~ opt(AS ~> colIdent) ^^ {
+      case streamName ~ _ ~ analyzePlan ~ newColumn =>
+        CreateStreamFromAnalyze(streamName, analyzePlan, newColumn)
+    }
+  }
+
+  protected lazy val createTrigger: Parser[JubaQLAST] = {
+    CREATE ~ TRIGGER ~ ON ~> streamIdent ~ FOR ~ EACH ~ ROW ~ opt(WHEN ~> expression) ~ EXECUTE ~ function ^^ {
+      case dsName ~ _ ~ _ ~ _ ~ condition ~ _ ~ expr =>
+        CreateTrigger(dsName, condition, expr)
+    }
+  }
+
+  protected lazy val createStreamFromSlidingWindow: Parser[JubaQLAST] = {
+    val aggregation: Parser[(String, List[Expression], Option[String])] =
+      (ident | AVG) ~ "(" ~ rep1sep(expression, ",") ~ ")" ~ opt(AS ~> colIdent) ^^ {
+        case funcName ~ _ ~ parameters ~ _ ~ maybeAlias =>
+          (funcName, parameters, maybeAlias)
+      }
+    val aggregationList = rep1sep(aggregation, ",")
+
+    val filter: Parser[Expression] = WHERE ~ expression ^^ { case _ ~ e => e}
+    val having: Parser[Expression] = HAVING ~> expression
+
+    CREATE ~ STREAM ~> streamIdent ~ FROM ~ SLIDING ~ WINDOW ~
+      "(" ~ SIZE ~ numericLit ~ ADVANCE ~ numericLit ~ (TIME | TUPLES) ~ ")" ~
+      OVER ~ streamIdent ~ WITH ~ aggregationList ~ opt(filter) ~ opt(having) ^^ {
+      case streamName ~ _ ~ _ ~ _ ~ _ ~ _ /* FROM SLIDING WINDOW ( SIZE */ ~
+        size ~ _ /* ADVANCE */ ~ advance ~ windowType ~ _ /* ) */ ~
+        _ /* OVER */ ~ source ~ _ /* WITH */ ~ funcSpecs ~ f ~ h =>
+        // start from a table/stream with the given name
+        val base = UnresolvedRelation(Seq(source), None)
+        // apply the precondition
+        val withFilter = f.map(f => Filter(f, base)).getOrElse(base)
+        // select only the column that we use in the window.
+        val allColumns = funcSpecs.map(_._2.last)
+        val withProjection = Project(assignAliases(allColumns), withFilter)
+        // NB. we have to add a Cast to the correct type in every column later,
+        // after we have mapped function names to concrete functions.
+
+        CreateStreamFromSlidingWindow(streamName, size.toInt, advance.toInt,
+          windowType.toLowerCase, withProjection, funcSpecs,
+          h)
+    }
+  }
+
+  protected lazy val logStream: Parser[JubaQLAST] = {
+    LOG ~ STREAM ~> streamIdent ^^ {
+      case streamName =>
+        LogStream(streamName)
+    }
+  }
 
   protected lazy val update: Parser[JubaQLAST] = {
-    UPDATE ~ MODEL ~> ident ~ USING ~ ident ~ FROM ~ ident ^^ {
+    UPDATE ~ MODEL ~> modelIdent ~ USING ~ funcIdent ~ FROM ~ streamIdent ^^ {
       case modelName ~ _ ~ rpcName ~ _ ~ source =>
         Update(modelName, rpcName, source)
     }
   }
 
   protected lazy val analyze: Parser[JubaQLAST] = {
-    ANALYZE ~> stringLit ~ BY ~ MODEL ~ ident ~ USING ~ ident ^^ {
+    ANALYZE ~> stringLit ~ BY ~ MODEL ~ modelIdent ~ USING ~ funcIdent ^^ {
       case data ~ _ ~ _ ~ modelName ~ _ ~ rpc =>
         Analyze(modelName, rpc, data)
+    }
+  }
+
+  protected lazy val analyzeStream: Parser[Analyze] = {
+    ANALYZE ~> streamIdent ~ BY ~ MODEL ~ modelIdent ~ USING ~ funcIdent ^^ {
+      case source ~ _ ~ _ ~ modelName ~ _ ~ rpc =>
+        Analyze(modelName, rpc, source)
+    }
+  }
+
+  protected lazy val status: Parser[JubaQLAST] = {
+    STATUS ^^ {
+      case _ =>
+        Status()
     }
   }
 
@@ -145,6 +324,13 @@ class JubaQLParser extends SqlParser with LazyLogging {
     }
   }
 
+  protected lazy val startProcessing: Parser[JubaQLAST] = {
+    START ~ PROCESSING ~> streamIdent ^^ {
+      case dsName =>
+        StartProcessing(dsName)
+    }
+  }
+
   protected lazy val stopProcessing: Parser[JubaQLAST] = {
     STOP ~> PROCESSING ^^ {
       case _ =>
@@ -152,24 +338,66 @@ class JubaQLParser extends SqlParser with LazyLogging {
     }
   }
 
+  /** A parser which matches a code literal */
+  def codeLit: Parser[String] =
+    elem("code literal", _.isInstanceOf[lexical.CodeLit]) ^^ (_.chars)
+
+  protected lazy val createFunction: Parser[JubaQLAST] = {
+    CREATE ~ FUNCTION ~> funcIdent ~ "(" ~ repsep(stringPairs, ",") ~ ")" ~
+      RETURNS ~ (numeric | string| boolean) ~ LANGUAGE ~ ident ~ AS ~ codeLit ^^ {
+      case f ~ _ ~ args ~ _ ~ _ /*RETURNS*/ ~ retType ~ _ /*LANGUAGE*/ ~ lang ~
+        _ /*AS*/ ~ body =>
+        CreateFunction(f, args, retType, lang, body)
+    }
+  }
+
+  protected lazy val createFeatureFunction: Parser[JubaQLAST] = {
+    CREATE ~ FEATURE ~ FUNCTION ~> funcIdent ~ "(" ~ repsep(stringPairs, ",") ~ ")" ~
+      LANGUAGE ~ ident ~ AS ~ codeLit ^^ {
+      case f ~ _ ~ args ~ _ ~ _ /*LANGUAGE*/ ~ lang ~
+        _ /*AS*/ ~ body =>
+        CreateFeatureFunction(f, args, lang, body)
+    }
+  }
+
+  protected lazy val createTriggerFunction: Parser[JubaQLAST] = {
+    CREATE ~ TRIGGER ~ FUNCTION ~> funcIdent ~ "(" ~ repsep(stringPairs, ",") ~ ")" ~
+      LANGUAGE ~ ident ~ AS ~ codeLit ^^ {
+      case f ~ _ ~ args ~ _ ~ _ /*LANGUAGE*/ ~ lang ~
+        _ /*AS*/ ~ body =>
+        CreateTriggerFunction(f, args, lang, body)
+    }
+  }
+
   protected lazy val jubaQLQuery: Parser[JubaQLAST] = {
     createDatasource |
       createModel |
+      createStreamFromSelect |
+      createStreamFromSlidingWindow |
+      createStreamFromAnalyze |
+      createTrigger |
+      logStream |
       update |
       analyze |
+      status |
       shutdown |
-      stopProcessing
+      startProcessing |
+      stopProcessing |
+      createFunction |
+      createFeatureFunction |
+      createTriggerFunction
   }
 
   // note: apply cannot override incompatible type with parent class
   //override def apply(input: String): Option[JubaQLAST] = {
   def parse(input: String): Option[JubaQLAST] = {
+    logger.info(s"trying to parse '$input'")
     phrase(jubaQLQuery)(new lexical.Scanner(input)) match {
       case Success(r, q) =>
-        logger.debug(s"successfully parsed '$input' into $r")
+        logger.debug(s"successfully parsed input: $r")
         Option(r)
       case x =>
-        logger.warn(s"failed to parse '$input' as JubaQL")
+        logger.warn(s"failed to parse input as JubaQL: $x")
         None
     }
   }

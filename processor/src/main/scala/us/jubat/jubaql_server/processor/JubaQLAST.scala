@@ -15,8 +15,10 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 package us.jubat.jubaql_server.processor
 
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.expressions.Expression
 
-sealed abstract trait JubaQLAST
+sealed trait JubaQLAST
 
 case class
 CreateDatasource(sourceName: String,
@@ -27,21 +29,49 @@ CreateDatasource(sourceName: String,
 case class
 CreateModel(algorithm: String,
             modelName: String,
-            configJson: String,
-            specifier: List[(String, List[String])]) extends JubaQLAST {
-  override def toString: String = "CreateModel(%s,%s,%s,%s)".format(
+            labelOrId: Option[(String, String)],
+            featureExtraction: List[(FeatureFunctionParameters, String)],
+            configJson: String) extends JubaQLAST {
+  override def toString: String = "CreateModel(%s,%s,%s,%s,%s)".format(
     algorithm,
     modelName,
+    labelOrId,
+    featureExtraction,
     if (configJson.size > 13) configJson.take(5) + "..." + configJson.takeRight(5)
-    else configJson,
-    specifier
+    else configJson
   )
 }
 
 case class Update(modelName: String, rpcName: String, source: String) extends JubaQLAST
 
+case class CreateStreamFromSelect(streamName: String, selectPlan: LogicalPlan) extends JubaQLAST
+
+case class CreateStreamFromAnalyze(streamName: String, analyze: Analyze, newColumn: Option[String]) extends JubaQLAST
+
+case class CreateTrigger(dsName: String, condition: Option[Expression], expr: Expression) extends JubaQLAST
+
+case class CreateStreamFromSlidingWindow(streamName: String, windowSize: Int, slideInterval: Int,
+                                         windowType: String, source: LogicalPlan,
+                                         funcSpecs: List[(String, List[Expression], Option[String])],
+                                         postCond: Option[Expression]) extends JubaQLAST
+
 case class Analyze(modelName: String, rpcName: String, data: String) extends JubaQLAST
+
+case class LogStream(streamName: String) extends JubaQLAST
+
+case class Status() extends JubaQLAST
 
 case class Shutdown() extends JubaQLAST
 
+case class StartProcessing(dsName: String) extends JubaQLAST
+
 case class StopProcessing() extends JubaQLAST
+
+case class CreateFunction(funcName: String, args: List[(String, String)],
+                          returnType: String, lang: String, body: String) extends JubaQLAST
+
+case class CreateFeatureFunction(funcName: String, args: List[(String, String)],
+                                 lang: String, body: String) extends JubaQLAST
+
+case class CreateTriggerFunction(funcName: String, args: List[(String, String)],
+                                 lang: String, body: String) extends JubaQLAST

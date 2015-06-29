@@ -16,6 +16,7 @@
 package us.jubat.jubaql_server.processor
 
 import org.scalatest.{ShouldMatchers, BeforeAndAfterAll, FlatSpec}
+import org.scalatest.EitherValues._
 import org.apache.spark.SparkContext
 
 /* This test case tests only the state-independent (helper) functions of
@@ -30,8 +31,8 @@ class JubaQLServiceHelperSpec extends FlatSpec with ShouldMatchers with BeforeAn
   private var service: JubaQLServiceTester = null
 
   // create a subclass to test the protected methods
-  class JubaQLServiceTester(sc: SparkContext) extends JubaQLService(sc, RunMode.Development) {
-    override def parseJson(in: String): Option[JubaQLAST] =
+  class JubaQLServiceTester(sc: SparkContext) extends JubaQLService(sc, RunMode.Development, "file:///tmp/spark") {
+    override def parseJson(in: String): Either[(Int, String), JubaQLAST] =
       super.parseJson(in)
   }
 
@@ -42,8 +43,7 @@ class JubaQLServiceHelperSpec extends FlatSpec with ShouldMatchers with BeforeAn
                 """.stripMargin.trim
     val json = """{"query": "%s"}""".format(query.replace("\"", "\\\""))
     val result = service.parseJson(json)
-    result should not be empty
-    result.get shouldBe a[CreateDatasource]
+    result.right.value shouldBe a[CreateDatasource]
   }
 
   it should "be able to parse JSON with additional fields" taggedAs (LocalTest) in {
@@ -53,32 +53,31 @@ class JubaQLServiceHelperSpec extends FlatSpec with ShouldMatchers with BeforeAn
                 """.stripMargin.trim
     val json = """{"session_id": "test", "query": "%s"}""".format(query.replace("\"", "\\\""))
     val result = service.parseJson(json)
-    result should not be empty
-    result.get shouldBe a[CreateDatasource]
+    result.right.value shouldBe a[CreateDatasource]
   }
 
-  it should "yield None if the JSON contains a bogus query" taggedAs (LocalTest) in {
+  it should "return an error if the JSON contains a bogus query" taggedAs (LocalTest) in {
     val json = """{"query": "test"}"""
     val result = service.parseJson(json)
-    result shouldBe empty
+    result.left.value._1 shouldBe 400
   }
 
-  it should "yield None if the JSON contains a non-string query" taggedAs (LocalTest) in {
+  it should "return an error if the JSON contains a non-string query" taggedAs (LocalTest) in {
     val json = """{"query": 27}"""
     val result = service.parseJson(json)
-    result shouldBe empty
+    result.left.value._1 shouldBe 400
   }
 
-  it should "yield None if the JSON contains no query" taggedAs (LocalTest) in {
+  it should "return an error if the JSON contains no query" taggedAs (LocalTest) in {
     val json = """{"foo": "bar"}"""
     val result = service.parseJson(json)
-    result shouldBe empty
+    result.left.value._1 shouldBe 400
   }
 
-  it should "yield None if the string is no JSON" taggedAs (LocalTest) in {
-    val json = """{"foo": "bar"}"""
+  it should "return an error if the string is no JSON" taggedAs (LocalTest) in {
+    val json = """hello"""
     val result = service.parseJson(json)
-    result shouldBe empty
+    result.left.value._1 shouldBe 400
   }
 
   override protected def beforeAll(): Unit = {

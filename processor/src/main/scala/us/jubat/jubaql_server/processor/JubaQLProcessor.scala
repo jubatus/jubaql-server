@@ -20,7 +20,7 @@ import java.net.InetAddress
 import com.typesafe.scalalogging.slf4j.LazyLogging
 import org.apache.spark.SparkContext
 import com.twitter.finagle.{Http, Service}
-import com.twitter.util.Await
+import com.twitter.util.{Duration, Time, Await}
 import org.jboss.netty.handler.codec.http._
 import sun.misc.{SignalHandler, Signal}
 
@@ -63,6 +63,13 @@ object JubaQLProcessor extends LazyLogging {
     }
     logger.debug(s"Starting JubaQLProcessor in run mode $runMode")
 
+    // checkpointDir for Spark
+    val checkpointDir = scala.util.Properties.propOrElse("jubaql.checkpointdir", "")
+    if (checkpointDir.trim.isEmpty) {
+      logger.error("No jubaql.checkpointdir property")
+      System.exit(1)
+    }
+
     // When run through spark-submit, the Java system property "spark.master"
     // will contain the master passed to spark-submit and we *must* use the
     // same; otherwise use "local[3]".
@@ -73,7 +80,7 @@ object JubaQLProcessor extends LazyLogging {
     val sc = new SparkContext(master, "JubaQL Processor")
 
     // start HTTP interface
-    val service: Service[HttpRequest, HttpResponse] = new JubaQLService(sc, runMode)
+    val service: Service[HttpRequest, HttpResponse] = new JubaQLService(sc, runMode, checkpointDir)
     val errorHandler = new HandleExceptions
     logger.info("JubaQLProcessor HTTP server starting")
     val server = Http.serve(":*", errorHandler andThen service)
@@ -101,7 +108,10 @@ object JubaQLProcessor extends LazyLogging {
           unregister(regHandler)
           isRegistered = false
         }
-        Await.result(server.close())
+        // close HTTP server only after a short timeout to finish requests
+        // (otherwise sometimes the response to a SHUTDOWN command won't
+        // arrive at the client)
+        Await.result(server.close(Time.now + Duration.fromSeconds(5)))
       }
     }
 

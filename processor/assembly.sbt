@@ -1,16 +1,11 @@
-import AssemblyKeys._
-
-assemblySettings
-
 test in assembly := {}
 
 jarName in assembly := "jubaql-processor-assembly-" + version.value + ".jar"
 
-/// We MUST include Scala libraries, otherwise scalalogging won't
-/// be included: <https://github.com/sbt/sbt-assembly/issues/116>
-// assemblyOption in assembly ~= {
-//   _.copy(includeScala = false)
-// }
+// Scala libraries will be provided by the runtime.
+assemblyOption in assembly ~= {
+  _.copy(includeScala = false)
+}
 
 mergeStrategy in assembly <<= (mergeStrategy in assembly) {
   (old) => {
@@ -36,6 +31,9 @@ mergeStrategy in assembly <<= (mergeStrategy in assembly) {
     //   commons-beanutils-core-1.8.0.jar:org/apache/commons/beanutils/BasicDynaBean.class
     //   and others
     case PathList("org", "apache", xs @ _*) => MergeStrategy.last
+    // scala-logging-slf4j_2.10-2.1.2.jar:com/typesafe/scalalogging/slf4j/Logger$.class vs.
+    //   scalalogging-slf4j_2.10-1.1.0.jar:com/typesafe/scalalogging/slf4j/Logger$.class
+    case PathList("com", "typesafe", "scalalogging", xs @ _*) => MergeStrategy.last
     // javax.transaction-1.1.1.v201105210645.jar:plugin.properties vs.
     //   javax.servlet-3.0.0.v201112011016.jar:plugin.properties vs.
     //   javax.mail.glassfish-1.4.1.v201005082020.jar:plugin.properties vs.
@@ -48,12 +46,6 @@ mergeStrategy in assembly <<= (mergeStrategy in assembly) {
     //
     case x => old(x)
   }
-}
-
-// take only the Spark and Hadoop jars out (this is more or less an
-// alternative to marking Spark as "provided")
-excludedJars in assembly <<= (fullClasspath in assembly) map { cp =>
-  cp filter {item => item.data.getPath.contains("/org.apache.hadoop/")}
 }
 
 // add "provided" dependencies back to classpath when using "sbt run".

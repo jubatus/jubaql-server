@@ -26,7 +26,9 @@ object HttpClientPerJvm extends LazyLogging {
 
   protected var _stopped = false
 
-  def stopped: Boolean = _stopped
+  protected var _interrupted = false
+
+  def stopped: Boolean = _stopped || _interrupted
 
   def startChecking(statusUrl: String) = synchronized {
     // only start the check if none is running already
@@ -43,11 +45,44 @@ object HttpClientPerJvm extends LazyLogging {
               synchronized {
                 _stopped = true
               }
+            case Some("stop-and-poll") if !_interrupted =>
+              // if we see stop-and-poll state, we must tell Jubatus
+              // instances to stop running, but the polling should
+              // continue until we see either "shutdown" or "running".
+              // in both cases we should exit this loop, but in the
+              // latter case we should reset `running` and `_stopped`
+              // to their initial values.
+              logger.debug("status switched to 'stop-and-poll', stopping")
+              synchronized {
+                _interrupted = true
+              }
+            case Some("running") if _interrupted =>
+              // in this state, the server has switched from "stop-and-poll"
+              // to "running", i.e. we should set this object back to its
+              // initial state after breaking out of the loop
+              logger.debug("status switched back to 'running', resetting")
+              synchronized {
+                _stopped = true
+              }
             case _ =>
           }
-          Thread.sleep(1000)
+          if (!_interrupted && !_stopped) {
+            Thread.sleep(1000)
+          } else if (_interrupted && !_stopped) {
+            // poll more frequently when we are waiting to get back to
+            // "running" state
+            Thread.sleep(300)
+          } else {
+            // when we are stopped, exit immediately
+          }
         }
         h.shutdown()
+        if (_stopped && _interrupted) {
+          _stopped = false
+          _interrupted = false
+          running = false
+          logger.debug("HTTP poller reset to initial state")
+        }
       }
       // indicate that we are running now
       running = true

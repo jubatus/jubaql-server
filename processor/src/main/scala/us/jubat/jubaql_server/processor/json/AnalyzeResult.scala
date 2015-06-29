@@ -15,4 +15,18 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 package us.jubat.jubaql_server.processor.json
 
+// We use a sealed trait to make sure we have all possible
+// response types in *this* file.
+sealed trait AnalyzeResult
+
 case class AnomalyScore(score: Float)
+  extends AnalyzeResult
+
+case class ClassifierPrediction(label: String, score: Double)
+
+case class ClassifierResult(predictions: List[ClassifierPrediction])
+  extends AnalyzeResult
+
+case class DatumResult(string_values: Map[String, String],
+                       num_values: Map[String, Double])
+  extends AnalyzeResult

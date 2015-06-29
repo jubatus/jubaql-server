@@ -15,33 +15,164 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 package us.jubat.jubaql_server.processor.updater
 
-import us.jubat.jubaql_server.processor.CreateModel
-import org.json4s._
+import us.jubat.jubaql_server.processor.{CreateModel, DatumExtractor}
+import us.jubat.jubaql_server.processor.json.DatumResult
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.catalyst.types._
+import us.jubat.common.Datum
 import us.jubat.recommender.RecommenderClient
 
-class Recommender(val jubaHost: String, jubaPort: Int, cm: CreateModel, val id: String, val keys: List[String]) extends Updater with Serializable {
-  override def apply(iter: Iterator[JValue], statusUrl: String): Iterator[Unit] = {
-    HttpClientPerJvm.startChecking(statusUrl)
+import scala.collection.JavaConversions._
+import scala.collection.concurrent
+
+class Recommender(val jubaHost: String, jubaPort: Int, cm: CreateModel,
+                  featureFunctions: concurrent.Map[String, String],
+                  val idColumnName: String)
+  extends JubatusClient with Serializable {
+
+  // TODO wrap all network calls to Jubatus in try{} blocks
+
+  override def update(rowSchema: Map[String, (Int, DataType)],
+                      iter: Iterator[Row]): Unit = {
+    // set up Jubatus client and logger
     val client = new RecommenderClient(jubaHost, jubaPort, cm.modelName, 5)
     val logger = createLogger
     logger.info(s"started RecommenderClient: $client")
-    var stopped_? = HttpClientPerJvm.stopped
-    val out = iter.takeWhile(_ => !stopped_?).zipWithIndex.map(valueWithIndex => {
-      val (jvalue, idx) = valueWithIndex
-      // update_row
-      jvalue \ id match {
-        case JString(updateId) =>
-          val datum = extractDatum(keys, jvalue)
-          client.updateRow(updateId, datum)
-          if ((idx+1) % 1000 == 0) {
-            logger.debug("processed 1000 items using 'updateRow' method")
-            stopped_? = HttpClientPerJvm.stopped
+
+    // get the index of the id column (if it exists)
+    rowSchema.get(idColumnName) match {
+      case None =>
+        val msg = "the given schema %s does not contain a column named '%s'".format(
+          rowSchema, idColumnName)
+        logger.error(msg)
+        throw new RuntimeException(msg)
+
+      case Some((idIdx, _)) =>
+        // loop over the data as long as the Spark driver is not stopped
+        var stopped_? = HttpClientPerJvm.stopped
+        if (stopped_?) {
+          logger.debug("driver status is 'stopped', skip processing")
+        }
+        var batchStartTime = System.currentTimeMillis()
+        iter.takeWhile(_ => !stopped_?).zipWithIndex.foreach { case (row, idx) => {
+          if (!row.isNullAt(idIdx)) {
+            // create datum and send to Jubatus
+            val idValue = row.getString(idIdx)
+            val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
+            retry(2, logger)(client.updateRow(idValue, datum))
+
+            // every 1000 items, check if the Spark driver is still running
+            if ((idx + 1) % 1000 == 0) {
+              val duration = System.currentTimeMillis() - batchStartTime
+              logger.debug(s"processed 1000 items using 'updateRow' method in $duration ms")
+              stopped_? = HttpClientPerJvm.stopped
+              if (stopped_?) {
+                logger.debug("driver status is 'stopped', end processing")
+              }
+              batchStartTime = System.currentTimeMillis()
+            }
+          } else {
+            logger.warn("row %s has a NULL id".format(row))
           }
-        case _ =>
-        // `id` string field not found
+        }
+        }
+    }
+  }
+
+  override def analyzeMethod(rpcName: String) = {
+    val returnType = StructType(
+      StructField("string_values", MapType(StringType, StringType, valueContainsNull = false), nullable = true) ::
+        StructField("num_values", MapType(StringType, DoubleType, valueContainsNull = false), nullable = true) ::
+        Nil
+    )
+    if (rpcName == "complete_row_from_id") {
+      (returnType, (rowSchema, iter) => completeRowFromId(rowSchema, iter))
+    } else if (rpcName == "complete_row_from_datum") {
+      (returnType, completeRowFromDatum)
+    } else {
+      val msg = s"unknown RPC method: '$rpcName'"
+      createLogger.warn(msg)
+      throw new RuntimeException(msg)
+    }
+  }
+
+  def completeRowFromId(rowSchema: Map[String, (Int, DataType)],
+                        iter: Iterator[Row]): Iterator[Row] = {
+    // set up Jubatus client and logger
+    val client = new RecommenderClient(jubaHost, jubaPort, cm.modelName, 5)
+    val logger = createLogger
+    logger.info(s"started RecommenderClient: $client")
+
+    // loop over the data as long as the Spark driver is not stopped
+    var stopped_? = HttpClientPerJvm.stopped
+    if (stopped_?) {
+      logger.debug("driver status is 'stopped', skip processing")
+    }
+    var batchStartTime = System.currentTimeMillis()
+    iter.takeWhile(_ => !stopped_?).zipWithIndex.map { case (row, idx) => {
+
+      val id = extractIdOrLabel(idColumnName, rowSchema, row, logger)
+      val fullDatum = retry(2, logger)(client.completeRowFromId(id))
+      val wrappedFullDatum = datumToJson(fullDatum)
+
+      // every 1000 items, check if the Spark driver is still running
+      if ((idx + 1) % 1000 == 0) {
+        val duration = System.currentTimeMillis() - batchStartTime
+        logger.debug(s"processed 1000 items using 'complete_row_from_id' method in $duration ms")
+        stopped_? = HttpClientPerJvm.stopped
+        if (stopped_?) {
+          logger.debug("driver status is 'stopped', end processing")
+        }
+        batchStartTime = System.currentTimeMillis()
       }
-      ()
-    })
-    out
+
+      // we must add a nested row (not case class) to allow for nested queries
+      Row.fromSeq(row :+ Row.fromSeq(wrappedFullDatum.productIterator.toSeq))
+    }
+    }
+  }
+
+  def completeRowFromDatum(rowSchema: Map[String, (Int, DataType)],
+                           iter: Iterator[Row]): Iterator[Row] = {
+    // set up Jubatus client and logger
+    val client = new RecommenderClient(jubaHost, jubaPort, cm.modelName, 5)
+    val logger = createLogger
+    logger.info(s"started RecommenderClient: $client")
+
+    // loop over the data as long as the Spark driver is not stopped
+    var stopped_? = HttpClientPerJvm.stopped
+    if (stopped_?) {
+      logger.debug("driver status is 'stopped', skip processing")
+    }
+    var batchStartTime = System.currentTimeMillis()
+    iter.takeWhile(_ => !stopped_?).zipWithIndex.map { case (row, idx) => {
+
+      // convert to datum
+      val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
+      val fullDatum = retry(2, logger)(client.completeRowFromDatum(datum))
+      val wrappedFullDatum = datumToJson(fullDatum)
+
+      // every 1000 items, check if the Spark driver is still running
+      if ((idx + 1) % 1000 == 0) {
+        val duration = System.currentTimeMillis() - batchStartTime
+        logger.debug(s"processed 1000 items using 'complete_row_from_datum' method in $duration ms")
+        stopped_? = HttpClientPerJvm.stopped
+        if (stopped_?) {
+          logger.debug("driver status is 'stopped', end processing")
+        }
+        batchStartTime = System.currentTimeMillis()
+      }
+
+      // we must add a nested row (not case class) to allow for nested queries
+      Row.fromSeq(row :+ Row.fromSeq(wrappedFullDatum.productIterator.toSeq))
+    }
+    }
+  }
+
+  protected def datumToJson(datum: Datum): DatumResult = {
+    DatumResult(
+      datum.getStringValues().map(v => (v.key, v.value)).toMap,
+      datum.getNumValues().map(v => (v.key, v.value)).toMap
+    )
   }
 }

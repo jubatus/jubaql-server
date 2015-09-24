@@ -37,25 +37,13 @@ object JubaQLProcessor extends LazyLogging {
       case "production" =>
         // Require that zookeeper is given in production mode in
         // the form "host:port,host:port,...". If port is not given, take 2181.
-        val zookeeperString = scala.util.Properties.propOrElse("jubaql.zookeeper", "")
-        if (zookeeperString.trim.isEmpty) {
+        val zookeeperString = scala.util.Properties.propOrEmpty("jubaql.zookeeper").trim
+        if (zookeeperString.isEmpty) {
           logger.error("system property jubaql.zookeeper must be given " +
             "in production mode (comma-separated host:port list)")
           System.exit(1)
         }
-        val hostPortRe = "^([a-zA-Z0-9.]*[a-zA-Z0-9])(:[0-9]+)?$".r
-        val hosts: Seq[(String, Int)] = zookeeperString.split(',').map(_ match {
-          case hostPortRe(host, portWithColon) =>
-            if (portWithColon == null)
-              (host, 2181)
-            else
-              (host, portWithColon.stripPrefix(":").toInt)
-          case x =>
-            logger.error(s"'$zookeeperString' is not a valid jubaql.zookeeper string")
-            System.exit(1)
-            null
-        })
-        RunMode.Production(hosts.toList)
+        RunMode.Production(zookeeperString)
       case other =>
         logger.error(s"bad run.mode property: $other")
         System.exit(1)

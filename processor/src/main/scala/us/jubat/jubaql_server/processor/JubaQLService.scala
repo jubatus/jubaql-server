@@ -325,12 +325,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
         }
         // TODO: location, resource
         val resource = Resource(priority = 0, memory = 256, virtualCores = 1)
+
+        val gatewayAddress = scala.util.Properties.propOrElse("jubaql.gateway.address","")
+        val sessionId = scala.util.Properties.propOrElse("jubaql.processor.sessionId","")
+        val applicationName = s"JubatusOnYarn:$gatewayAddress:$sessionId:${jubaType.name}:${cm.modelName}"
+
         val juba: ScFuture[JubatusYarnApplication] = runMode match {
           case RunMode.Production(zookeeper) =>
             val location = zookeeper.map {
               case (host, port) => Location(InetAddress.getByName(host), port)
             }
-            JubatusYarnApplication.start(cm.modelName, jubaType, location, configJsonStr, resource, 2)
+            JubatusYarnApplication.start(cm.modelName, jubaType, location, configJsonStr, resource, 2, applicationName)
           case RunMode.Development =>
             LocalJubatusApplication.start(cm.modelName, jubaType, configJsonStr)
         }

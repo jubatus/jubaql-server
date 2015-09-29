@@ -19,6 +19,7 @@ import java.net.InetAddress
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
+import collection.JavaConversions._
 
 import com.twitter.finagle.Service
 import com.twitter.util.{Future => TwFuture, Promise => TwPromise}
@@ -27,6 +28,7 @@ import io.netty.util.CharsetUtil
 import RunMode.{Production, Development}
 import us.jubat.jubaql_server.processor.json._
 import us.jubat.jubaql_server.processor.updater._
+import org.apache.hadoop.conf.Configuration
 import org.apache.spark.{SparkFiles, SparkContext}
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
@@ -44,10 +46,11 @@ import org.jboss.netty.handler.codec.http._
 import org.json4s._
 import org.json4s.native.{JsonMethods, Serialization}
 import org.json4s.JsonDSL._
+import org.apache.commons.io._
 import sun.misc.Signal
 import us.jubat.anomaly.AnomalyClient
 import us.jubat.classifier.ClassifierClient
-import us.jubat.common.Datum
+import us.jubat.common.{Datum, ClientBase}
 import us.jubat.recommender.RecommenderClient
 import us.jubat.yarn.client.{JubatusYarnApplication, JubatusYarnApplicationStatus, Resource}
 import us.jubat.yarn.common.{LearningMachineType, Location}
@@ -325,12 +328,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
         }
         // TODO: location, resource
         val resource = Resource(priority = 0, memory = 256, virtualCores = 1)
+
+        val gatewayAddress = scala.util.Properties.propOrElse("jubaql.gateway.address","")
+        val sessionId = scala.util.Properties.propOrElse("jubaql.processor.sessionId","")
+        val applicationName = s"JubatusOnYarn:$gatewayAddress:$sessionId:${jubaType.name}:${cm.modelName}"
+
         val juba: ScFuture[JubatusYarnApplication] = runMode match {
           case RunMode.Production(zookeeper) =>
             val location = zookeeper.map {
               case (host, port) => Location(InetAddress.getByName(host), port)
             }
-            JubatusYarnApplication.start(cm.modelName, jubaType, location, configJsonStr, resource, 2)
+            JubatusYarnApplication.start(cm.modelName, jubaType, location, configJsonStr, resource, 2, applicationName)
           case RunMode.Development =>
             LocalJubatusApplication.start(cm.modelName, jubaType, configJsonStr)
         }
@@ -934,20 +942,20 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           //   (0 until nParams).map(n => s"x$n: AnyRef").mkString(", ")
           // }
           //
-          // def caseTypeString(sqlType: String, scalaType: String, defaultValue: String, nArgs: Int): String = {
+          // def caseTypeString(sqlType: String, scalaType: String, nArgs: Int): String = {
           //   val args = nArgsString(nArgs)
           //   val params = nParamsString(nArgs)
           //   s"""case "$sqlType" =>
           //      |  sqlc.registerFunction(funcName, ($params) => {
           //      |    JavaScriptUDFManager.registerAndCall[$scalaType](funcName,
-          //      |      $nArgs, funcBody, $args).getOrElse($defaultValue)
+          //      |      $nArgs, funcBody, $args)
           //      |  })""".stripMargin
           // }
           //
           // def caseNArgs(nArgs: Int): String = {
-          //   val numericCase = caseTypeString("numeric", "Double", "0.0", nArgs).split("\n").map("    " + _).mkString("\n")
-          //   val stringCase = caseTypeString("string", "String", "\"\"", nArgs).split("\n").map("    " + _).mkString("\n")
-          //   val booleanCase = caseTypeString("boolean", "Boolean", "false", nArgs).split("\n").map("    " + _).mkString("\n")
+          //   val numericCase = caseTypeString("numeric", "Double", nArgs).split("\n").map("    " + _).mkString("\n")
+          //   val stringCase = caseTypeString("string", "String", nArgs).split("\n").map("    " + _).mkString("\n")
+          //   val booleanCase = caseTypeString("boolean", "Boolean", nArgs).split("\n").map("    " + _).mkString("\n")
           //   s"""case $nArgs =>
           //      |  returnType match {
           //      |$numericCase
@@ -964,17 +972,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
               case "numeric" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Double](funcName,
-                    1, funcBody, x0).getOrElse(0.0)
+                    1, funcBody, x0)
                 })
               case "string" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[String](funcName,
-                    1, funcBody, x0).getOrElse("")
+                    1, funcBody, x0)
                 })
               case "boolean" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Boolean](funcName,
-                    1, funcBody, x0).getOrElse(false)
+                    1, funcBody, x0)
                 })
             }
             Right(StatementProcessed("CREATE FUNCTION"))
@@ -984,17 +992,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
               case "numeric" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Double](funcName,
-                    2, funcBody, x0, x1).getOrElse(0.0)
+                    2, funcBody, x0, x1)
                 })
               case "string" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[String](funcName,
-                    2, funcBody, x0, x1).getOrElse("")
+                    2, funcBody, x0, x1)
                 })
               case "boolean" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Boolean](funcName,
-                    2, funcBody, x0, x1).getOrElse(false)
+                    2, funcBody, x0, x1)
                 })
             }
             Right(StatementProcessed("CREATE FUNCTION"))
@@ -1004,17 +1012,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
               case "numeric" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Double](funcName,
-                    3, funcBody, x0, x1, x2).getOrElse(0.0)
+                    3, funcBody, x0, x1, x2)
                 })
               case "string" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[String](funcName,
-                    3, funcBody, x0, x1, x2).getOrElse("")
+                    3, funcBody, x0, x1, x2)
                 })
               case "boolean" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Boolean](funcName,
-                    3, funcBody, x0, x1, x2).getOrElse(false)
+                    3, funcBody, x0, x1, x2)
                 })
             }
             Right(StatementProcessed("CREATE FUNCTION"))
@@ -1024,17 +1032,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
               case "numeric" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Double](funcName,
-                    4, funcBody, x0, x1, x2, x3).getOrElse(0.0)
+                    4, funcBody, x0, x1, x2, x3)
                 })
               case "string" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[String](funcName,
-                    4, funcBody, x0, x1, x2, x3).getOrElse("")
+                    4, funcBody, x0, x1, x2, x3)
                 })
               case "boolean" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Boolean](funcName,
-                    4, funcBody, x0, x1, x2, x3).getOrElse(false)
+                    4, funcBody, x0, x1, x2, x3)
                 })
             }
             Right(StatementProcessed("CREATE FUNCTION"))
@@ -1044,17 +1052,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
               case "numeric" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef, x4: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Double](funcName,
-                    5, funcBody, x0, x1, x2, x3, x4).getOrElse(0.0)
+                    5, funcBody, x0, x1, x2, x3, x4)
                 })
               case "string" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef, x4: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[String](funcName,
-                    5, funcBody, x0, x1, x2, x3, x4).getOrElse("")
+                    5, funcBody, x0, x1, x2, x3, x4)
                 })
               case "boolean" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef, x4: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Boolean](funcName,
-                    5, funcBody, x0, x1, x2, x3, x4).getOrElse(false)
+                    5, funcBody, x0, x1, x2, x3, x4)
                 })
             }
             Right(StatementProcessed("CREATE FUNCTION"))
@@ -1121,7 +1129,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
             // Returns an Int value because registerFunction does not accept a function which returns Unit.
             // The Int value is not used.
             sqlc.registerFunction(funcName, (x0: AnyRef) => {
-              JavaScriptUDFManager.registerAndCall[Int](funcName,
+              JavaScriptUDFManager.registerAndOptionCall[Int](funcName,
                 1, funcBody, x0).getOrElse(0)
             })
             Right(StatementProcessed("CREATE TRIGGER FUNCTION"))
@@ -1129,7 +1137,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           case 2 =>
             // Returns Int for the above reason.
             sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef) => {
-              JavaScriptUDFManager.registerAndCall[Int](funcName,
+              JavaScriptUDFManager.registerAndOptionCall[Int](funcName,
                 2, funcBody, x0, x1).getOrElse(0)
             })
             Right(StatementProcessed("CREATE TRIGGER FUNCTION"))
@@ -1137,7 +1145,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           case 3 =>
             // Returns Int for the above reason.
             sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef) => {
-              JavaScriptUDFManager.registerAndCall[Int](funcName,
+              JavaScriptUDFManager.registerAndOptionCall[Int](funcName,
                 3, funcBody, x0, x1, x2).getOrElse(0)
             })
             Right(StatementProcessed("CREATE TRIGGER FUNCTION"))
@@ -1145,7 +1153,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           case 4 =>
             // Returns Int for the above reason.
             sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef) => {
-              JavaScriptUDFManager.registerAndCall[Int](funcName,
+              JavaScriptUDFManager.registerAndOptionCall[Int](funcName,
                 4, funcBody, x0, x1, x2, x3).getOrElse(0)
             })
             Right(StatementProcessed("CREATE TRIGGER FUNCTION"))
@@ -1153,7 +1161,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           case 5 =>
             // Returns Int for the above reason.
             sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef, x4: AnyRef) => {
-              JavaScriptUDFManager.registerAndCall[Int](funcName,
+              JavaScriptUDFManager.registerAndOptionCall[Int](funcName,
                 5, funcBody, x0, x1, x2, x3, x4).getOrElse(0)
             })
             Right(StatementProcessed("CREATE TRIGGER FUNCTION"))
@@ -1164,8 +1172,74 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
             Left((400, msg))
         }
 
+      case SaveModel(modelName, modelPath, modelId) =>
+        models.get(modelName) match {
+          case Some((jubaApp, createModelStmt, machineType)) =>
+            val chkResult = runMode match {
+              case RunMode.Production(zookeeper) =>
+                modelPath.startsWith("hdfs://")
+              case RunMode.Development =>
+                modelPath.startsWith("file://")
+            }
+
+            if (chkResult) {
+              val juba = jubaApp.saveModel(new org.apache.hadoop.fs.Path(modelPath), modelId)
+              juba match {
+                case Failure(t) =>
+                  val msg = s"SAVE MODEL failed: ${t.getMessage}"
+                  logger.error(msg, t)
+                  Left((500, msg))
+
+                case _ =>
+                  Right(StatementProcessed("SAVE MODEL"))
+              }
+            } else {
+              val msg = s"invalid model path ($modelPath)"
+              logger.warn(msg)
+              Left((400, msg))
+            }
+
+          case None =>
+            val msg = s"model '$modelName' does not exist"
+            logger.warn(msg)
+            Left((400, msg))
+        }
+
+      case LoadModel(modelName, modelPath, modelId) =>
+        models.get(modelName) match {
+          case Some((jubaApp, createModelStmt, machineType)) =>
+            val chkResult = runMode match {
+              case RunMode.Production(zookeeper) =>
+                modelPath.startsWith("hdfs://")
+              case RunMode.Development =>
+                modelPath.startsWith("file://")
+            }
+
+            if (chkResult) {
+              val juba = jubaApp.loadModel(new org.apache.hadoop.fs.Path(modelPath), modelId)
+              juba match {
+                case Failure(t) =>
+                  val msg = s"LOAD MODEL failed: ${t.getMessage}"
+                  logger.error(msg, t)
+                  Left((500, msg))
+
+                case _ =>
+                  Right(StatementProcessed("LOAD MODEL"))
+              }
+            } else {
+              val msg = s"invalid model path ($modelPath)"
+              logger.warn(msg)
+              Left((400, msg))
+            }
+
+          case None =>
+            val msg = s"model '$modelName' does not exist"
+            logger.warn(msg)
+            Left((400, msg))
+        }
+
       case other =>
-        val msg = "no handler for " + other
+        val msg = s"no handler for $other"
         logger.error(msg)
         Left((500, msg))
     }
@@ -1511,8 +1585,8 @@ object LocalJubatusApplication extends LazyLogging {
           namedPipeWriter.close()
         }
 
-        new LocalJubatusApplication(jubatusProcess, aLearningMachineName, jubaCmdName,
-          rpcPort)
+        new LocalJubatusApplication(jubatusProcess, aLearningMachineName, aLearningMachineType,
+            jubaCmdName, rpcPort)
       } finally {
         namedPipe.delete()
       }
@@ -1566,8 +1640,11 @@ object LocalJubatusApplication extends LazyLogging {
 }
 
 // LocalJubatusApplication is not a JubatusYarnApplication, but extends JubatusYarnApplication for implementation.
-class LocalJubatusApplication(jubatus: Process, name: String, jubaCmdName: String, port: Int = 9199)
+class LocalJubatusApplication(jubatus: Process, name: String, aLearningMachineType: LearningMachineType, jubaCmdName: String, port: Int = 9199)
   extends JubatusYarnApplication(Location(InetAddress.getLocalHost, port), List(), null) {
+
+  private val timeoutCount: Int = 180
+  private val fileRe = """file://(.+)""".r
 
   override def status: JubatusYarnApplicationStatus = {
     throw new NotImplementedError("status is not implemented")
@@ -1585,10 +1662,136 @@ class LocalJubatusApplication(jubatus: Process, name: String, jubaCmdName: Strin
   }
 
   override def loadModel(aModelPathPrefix: org.apache.hadoop.fs.Path, aModelId: String): Try[JubatusYarnApplication] = Try {
-    throw new NotImplementedError("loadModel is not implemented")
+    logger.info(s"loadModel path: $aModelPathPrefix, modelId: $aModelId")
+
+    val strHost = jubatusProxy.hostAddress
+    val strPort = jubatusProxy.port
+
+    val srcDir = aModelPathPrefix.toUri().toString() match {
+      case fileRe(filepath) =>
+        val realpath = if (filepath.startsWith("/")) {
+          filepath
+        } else {
+          (new java.io.File(".")).getAbsolutePath + "/" + filepath
+        }
+        "file://" + realpath
+    }
+    logger.debug(s"convert srcDir: $srcDir")
+
+    val localFileSystem = org.apache.hadoop.fs.FileSystem.getLocal(new Configuration())
+    val srcDirectory = localFileSystem.pathToFile(new org.apache.hadoop.fs.Path(srcDir))
+    val srcPath = new java.io.File(srcDirectory, aModelId)
+    if (!srcPath.exists()) {
+      val msg = s"model path does not exist ($srcPath)"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+
+    val srcFile = new java.io.File(srcPath, "0.jubatus")
+    if (!srcFile.exists()) {
+      val msg = s"model file does not exist ($srcFile)"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+
+    val client: ClientBase = aLearningMachineType match {
+      case LearningMachineType.Anomaly =>
+        new AnomalyClient(strHost, strPort, name, timeoutCount)
+
+      case LearningMachineType.Classifier =>
+        new ClassifierClient(strHost, strPort, name, timeoutCount)
+
+      case LearningMachineType.Recommender =>
+        new RecommenderClient(strHost, strPort, name, timeoutCount)
+    }
+
+    val stsMap: Map[String, java.util.Map[String, String]] = client.getStatus()
+    logger.debug(s"getStatus method result: $stsMap")
+    if (stsMap.size != 1) {
+      val msg = s"getStatus RPC failed (got ${stsMap.size} results)"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+
+    val strHostPort = stsMap.keys.head
+    logger.debug(s"key[Host_Port]: $strHostPort")
+
+    val baseDir = localFileSystem.pathToFile(new org.apache.hadoop.fs.Path(stsMap.get(strHostPort).get("datadir")))
+    val mType = stsMap.get(strHostPort).get("type")
+    val dstFile = new java.io.File(baseDir, s"${strHostPort}_${mType}_${aModelId}.jubatus")
+
+    logger.debug(s"srcFile: $srcFile")
+    logger.debug(s"dstFile: $dstFile")
+
+    FileUtils.copyFile(srcFile, dstFile, false)
+
+    val ret = client.load(aModelId)
+    if (!ret) {
+      val msg = "load RPC failed"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+    this
   }
 
   override def saveModel(aModelPathPrefix: org.apache.hadoop.fs.Path, aModelId: String): Try[JubatusYarnApplication] = Try {
-    throw new NotImplementedError("saveModel is not implemented")
+    logger.info(s"saveModel path: $aModelPathPrefix, modelId: $aModelId")
+
+    val strHost = jubatusProxy.hostAddress
+    val strPort = jubatusProxy.port
+
+    val strId = Math.abs(new Random().nextInt()).toString()
+
+    val result: Map[String, String] = aLearningMachineType match {
+      case LearningMachineType.Anomaly =>
+        val anomaly = new AnomalyClient(strHost, strPort, name, timeoutCount)
+        anomaly.save(strId)
+
+      case LearningMachineType.Classifier =>
+        val classifier = new ClassifierClient(strHost, strPort, name, timeoutCount)
+        classifier.save(strId)
+
+      case LearningMachineType.Recommender =>
+        val recommender = new RecommenderClient(strHost, strPort, name, timeoutCount)
+        recommender.save(strId)
+    }
+
+    logger.debug(s"save method result: $result")
+    if (result.size != 1) {
+      val msg = s"save RPC failed (got ${result.size} results)"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+
+    val strSavePath = result.values.head
+    logger.debug(s"srcFile: $strSavePath")
+
+    val dstDir = aModelPathPrefix.toUri().toString() match {
+      case fileRe(filepath) =>
+        val realpath = if (filepath.startsWith("/")) {
+          filepath
+        } else {
+          s"${(new java.io.File(".")).getAbsolutePath}/$filepath"
+        }
+        s"file://$realpath"
+    }
+    logger.debug(s"convert dstDir: $dstDir")
+
+    val localFileSystem = org.apache.hadoop.fs.FileSystem.getLocal(new Configuration())
+    val dstDirectory = localFileSystem.pathToFile(new org.apache.hadoop.fs.Path(dstDir))
+    val dstPath = new java.io.File(dstDirectory, aModelId)
+    val dstFile = new java.io.File(dstPath, "0.jubatus")
+    logger.debug(s"dstFile: $dstFile")
+
+    if (!dstPath.exists()) {
+      dstPath.mkdirs()
+    } else {
+      if (dstFile.exists()) {
+        dstFile.delete()
+      }
+    }
+
+    FileUtils.moveFile(new java.io.File(strSavePath), dstFile)
+    this
   }
 }

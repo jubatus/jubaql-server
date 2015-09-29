@@ -29,6 +29,9 @@ class LoginSpec extends FlatSpec with Matchers with GatewayServer {
   implicit val formats = DefaultFormats
 
   val url = :/("localhost", 9877) / "login"
+  val pro_url = :/("localhost", 9878) / "login"
+  val dev_url = :/("localhost", 9879) / "login"
+
 
   "POST to /login" should "return something" in {
     val req = Http(url.POST OK as.String)
@@ -52,5 +55,31 @@ class LoginSpec extends FlatSpec with Matchers with GatewayServer {
     val maybeSessionId = maybeJson.get.extractOpt[SessionId]
     maybeSessionId should not be None
     maybeSessionId.get.session_id.length should be > 0
+  }
+
+  "POST to /login(Production Mode)" should "return a JSON which contains session_id" in {
+    val req = Http(pro_url.POST OK as.String)
+    req.option.apply() should not be None
+    val returnedString = req.option.apply.get
+    val maybeJson = parseOpt(returnedString)
+    maybeJson should not be None
+    val maybeSessionId = maybeJson.get.extractOpt[SessionId]
+    maybeSessionId should not be None
+    //セッションIDの返却チェック
+    maybeSessionId.get.session_id.length should be > 0
+    //TODO JubaQL Processorのアプリケーション名とJubaQL Processorへの引数をテストの実行ログで確認(目視) -> 自動チェック化が必要
+  }
+
+  "POST to /login(Development Mode)" should "return a JSON which contains session_id" in {
+    val req = Http(dev_url.POST OK as.String)
+    req.option.apply() should not be None
+    val returnedString = req.option.apply.get
+    val maybeJson = parseOpt(returnedString)
+    maybeJson should not be None
+    val maybeSessionId = maybeJson.get.extractOpt[SessionId]
+    maybeSessionId should not be None
+    //セッションIDの返却チェック
+    maybeSessionId.get.session_id.length should be > 0
+    //TODO JubaQL Processorのアプリケーション名をテストの実行ログで確認(目視) -> 自動チェック化が必要
   }
 }

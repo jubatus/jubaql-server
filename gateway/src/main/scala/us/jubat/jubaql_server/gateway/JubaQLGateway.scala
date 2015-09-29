@@ -25,12 +25,20 @@ object JubaQLGateway extends LazyLogging {
     */
   def main(args: Array[String]) {
     val maybeParsedOptions: Option[CommandlineOptions] = parseCommandlineOption(args)
-    if (maybeParsedOptions.isEmpty)
+    if (maybeParsedOptions.isEmpty) {
       System.exit(1)
+    }
     val parsedOptions = maybeParsedOptions.get
 
     val ipAddress: String = parsedOptions.ip
     val port: Int = parsedOptions.port
+
+    val gatewayId = parsedOptions.gatewayId match {
+      case "" => s"${ipAddress}_${port}"
+      case id => id
+    }
+
+    val persist: Boolean = parsedOptions.persist
 
     var envp: Array[String] = Array()
     var runMode: RunMode = RunMode.Development()
@@ -75,8 +83,17 @@ object JubaQLGateway extends LazyLogging {
             "in production mode (comma-separated host:port list)")
           System.exit(1)
         }
+      case p: RunMode.Development =>
+        // When persist was configured, Set system property jubaql.zookeeper.
+        if (persist && zookeeperString.trim.isEmpty) {
+          logger.error("system property jubaql.zookeeper must be given " +
+            "with set persist flag (--persist)")
+          System.exit(1)
+        } else if (!persist && !zookeeperString.trim.isEmpty) {
+          logger.warn("persist flag is not specified; jubaql.zookeeper is ignored")
+        }
       case _ =>
-      // don't set environment in dev mode
+      // don't set environment in other mode
     }
     logger.info("Starting in run mode %s".format(runMode))
 
@@ -86,10 +103,11 @@ object JubaQLGateway extends LazyLogging {
     val plan = new GatewayPlan(ipAddress, port, envp, runMode,
                                sparkDistribution = sparkDistribution,
                                fatjar = fatjar,
-                               checkpointDir = checkpointDir)
+                               checkpointDir = checkpointDir, gatewayId, persist)
     val nettyServer = unfiltered.netty.Server.http(port).plan(plan)
     logger.info("JubaQLGateway starting")
     nettyServer.run()
+    plan.close()
     logger.info("JubaQLGateway shut down successfully")
   }
 
@@ -106,6 +124,14 @@ object JubaQLGateway extends LazyLogging {
         x =>
           if (x >= 1 && x <= 65535) success else failure("bad port number; port number n must be \"1 <= n <= 65535\"")
       } text (f"port (default: $defaultPort%d)")
+      opt[String]('g', "gatewayID") optional() valueName ("<gatewayID>") action {
+        (x, o) =>
+          o.copy(gatewayId = x)
+      } text ("Gateway ID (default: ip_port)")
+      opt[Unit]("persist") optional() valueName ("<persist>") action {
+        (x, o) =>
+          o.copy(persist = true)
+      } text ("session persist")
     }
 
     parser.parse(args, CommandlineOptions())
@@ -135,4 +161,4 @@ object JubaQLGateway extends LazyLogging {
   }
 }
 
-case class CommandlineOptions(ip: String = "", port: Int = JubaQLGateway.defaultPort)
+case class CommandlineOptions(ip: String = "", port: Int = JubaQLGateway.defaultPort, gatewayId: String = "", persist: Boolean = false)

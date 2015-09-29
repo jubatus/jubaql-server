@@ -75,3 +75,7 @@ case class CreateFeatureFunction(funcName: String, args: List[(String, String)],
 
 case class CreateTriggerFunction(funcName: String, args: List[(String, String)],
                                  lang: String, body: String) extends JubaQLAST
+
+case class SaveModel(modelName: String, modelPath: String, modelId: String) extends JubaQLAST
+
+case class LoadModel(modelName: String, modelPath: String, modelId: String) extends JubaQLAST

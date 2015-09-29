@@ -109,6 +109,16 @@ trait ProcessorTestManager
     (process, stdoutBuffer, sendJubaQLTo(port))
   }
 
+  protected def startProcessor(env: String): (Process,
+    StringBuffer, String => Try[(Int, JValue)]) = {
+    val command = Seq("./start-script/run")
+    val pb = commandToProcessBuilder(command, env)
+    val (logger, stdoutBuffer, stderrBuffer) = getProcessLogger()
+    val process = pb run logger
+    val port = getServerPort(stdoutBuffer)
+    (process, stdoutBuffer, sendJubaQLTo(port))
+  }
+
   protected def getProcessLogger(): (ProcessLogger, StringBuffer, StringBuffer) = {
     val stdoutBuffer = new StringBuffer()
     val stderrBuffer = new StringBuffer()
@@ -266,6 +276,55 @@ class CreateModelSpec
     // wait until shutdown
     val exitValue = process.exitValue()
     exitValue shouldBe 0
+  }
+
+  "CREATE MODEL(Production Mode)" should "return HTTP 200 on correct syntax and application-name of the as expected" taggedAs (JubatusTest) in {
+    // override before() processing
+    if (process != null) process.destroy()
+    // start production-mode processor
+    val startResult = startProcessor("-Drun.mode=production -Djubaql.zookeeper=127.0.0.1:2181 -Djubaql.checkpointdir=file:///tmp/spark -Djubaql.gateway.address=testAddress:1234 -Djubaql.processor.sessionId=1234567890abcdeABCDE")
+    process = startResult._1
+    stdout = startResult._2
+    sendJubaQL = startResult._3
+
+    val cmResult = sendJubaQL(goodCmStmt)
+    cmResult shouldBe a[Success[_]]
+    cmResult.get._1 shouldBe 200
+    cmResult.get._2 \ "result" shouldBe JString("CREATE MODEL (started)")
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+
+    // check application-name
+    stdout.toString should include("starting JubatusOnYarn:testAddress:1234:1234567890abcdeABCDE:classifier:test1")
+  }
+
+  "CREATE MODEL(Production Mode) without SystemProperty" should "return HTTP 200 on correct syntax and application-name of the as expected" taggedAs (JubatusTest) in {
+
+    // override before() processing
+    if (process != null) process.destroy()
+    // start production-mode processor (without System Property)
+    val startResult = startProcessor("-Drun.mode=production -Djubaql.zookeeper=127.0.0.1:2181 -Djubaql.checkpointdir=file:///tmp/spark")
+    process = startResult._1
+    stdout = startResult._2
+    sendJubaQL = startResult._3
+
+    val cmResult = sendJubaQL(goodCmStmt)
+    cmResult shouldBe a[Success[_]]
+    cmResult.get._1 shouldBe 200
+    cmResult.get._2 \ "result" shouldBe JString("CREATE MODEL (started)")
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+
+    // check application-name
+    stdout.toString should include("starting JubatusOnYarn:::classifier:test1")
   }
 }
 

@@ -55,31 +55,39 @@ class Classifier(val jubaHost: String, jubaPort: Int, cm: CreateModel,
           logger.debug("driver status is 'stopped', skip processing")
         }
         var batchStartTime = System.currentTimeMillis()
+        var idx: Int = 0
         // TODO we can make this more efficient using batch training
-        iter.takeWhile(_ => !stopped_?).zipWithIndex.foreach { case (row, idx) => {
-          if (!row.isNullAt(labelIdx)) {
-            // create datum and send to Jubatus
-            val labelValue = row.getString(labelIdx)
-            val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
-            val labelDatum = new LabeledDatum(labelValue, datum)
-            val datumList = new java.util.LinkedList[LabeledDatum]()
-            datumList.add(labelDatum)
-            retry(2, logger)(client.train(datumList))
+        while (iter.hasNext && !stopped_?) {
+          try {
+            val row = iter.next
+            if (!row.isNullAt(labelIdx)) {
+              // create datum and send to Jubatus
+              val labelValue = row.getString(labelIdx)
+              val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
+              val labelDatum = new LabeledDatum(labelValue, datum)
+              val datumList = new java.util.LinkedList[LabeledDatum]()
+              datumList.add(labelDatum)
+              retry(2, logger)(client.train(datumList))
 
-            // every 1000 items, check if the Spark driver is still running
-            if ((idx + 1) % 1000 == 0) {
-              val duration = System.currentTimeMillis() - batchStartTime
-              logger.debug(s"processed 1000 items using 'train' method in $duration ms")
-              stopped_? = HttpClientPerJvm.stopped
-              if (stopped_?) {
-                logger.debug("driver status is 'stopped', end processing")
+              // every 1000 items, check if the Spark driver is still running
+              if ((idx + 1) % 1000 == 0) {
+                val duration = System.currentTimeMillis() - batchStartTime
+                logger.debug(s"processed 1000 items using 'train' method in $duration ms")
+                stopped_? = HttpClientPerJvm.stopped
+                if (stopped_?) {
+                  logger.debug("driver status is 'stopped', end processing")
+                }
+                batchStartTime = System.currentTimeMillis()
               }
-              batchStartTime = System.currentTimeMillis()
+            } else {
+              logger.warn("row %s has a NULL label".format(row))
             }
-          } else {
-            logger.warn("row %s has a NULL label".format(row))
+          } catch {
+            case e: Exception =>
+              logger.error(s"Failed to train row.", e)
+          } finally {
+            idx += 1
           }
-        }
         }
     }
   }
@@ -110,45 +118,60 @@ class Classifier(val jubaHost: String, jubaPort: Int, cm: CreateModel,
       logger.debug("driver status is 'stopped', skip processing")
     }
     var batchStartTime = System.currentTimeMillis()
-    iter.takeWhile(_ => !stopped_?).zipWithIndex.flatMap { case (row, idx) => {
-      // TODO we can make this more efficient using batch training
-      // convert to datum
-      val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
-      val datumList = new java.util.LinkedList[Datum]()
-      datumList.add(datum)
-      // classify
-      val maybeClassifierResult = retry(2, logger)(client.classify(datumList).toList) match {
-        case labeledDatumList :: rest =>
-          if (!rest.isEmpty) {
-            logger.warn("received more than one result from classifier, " +
-              "ignoring all but the first")
-          }
-          if (labeledDatumList.isEmpty) {
-            logger.warn("got an empty classification list for datum")
-          }
-          Some(labeledDatumList.map(labeledDatum => {
-            ClassifierPrediction(labeledDatum.label, labeledDatum.score)
-          }).toList)
-        case Nil =>
-          logger.error("received no result from classifier")
-          None
-      }
 
-      // every 1000 items, check if the Spark driver is still running
-      if ((idx + 1) % 1000 == 0) {
-        val duration = System.currentTimeMillis() - batchStartTime
-        logger.debug(s"processed 1000 items using 'classify' method in $duration ms")
-        stopped_? = HttpClientPerJvm.stopped
-        if (stopped_?) {
-          logger.debug("driver status is 'stopped', end processing")
+    var resultSeq: Seq[Row] = List.empty[Row]
+    var idx: Int = 0
+    while(iter.hasNext && !stopped_?) {
+      try {
+        val row = iter.next
+        // TODO we can make this more efficient using batch training
+        // convert to datum
+        val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
+        val datumList = new java.util.LinkedList[Datum]()
+        datumList.add(datum)
+        // classify
+        val maybeClassifierResult = retry(2, logger)(client.classify(datumList).toList) match {
+          case labeledDatumList :: rest =>
+            if (!rest.isEmpty) {
+              logger.warn("received more than one result from classifier, " +
+                "ignoring all but the first")
+            }
+            if (labeledDatumList.isEmpty) {
+              logger.warn("got an empty classification list for datum")
+            }
+            Some(labeledDatumList.map(labeledDatum => {
+              ClassifierPrediction(labeledDatum.label, labeledDatum.score)
+            }).toList)
+          case Nil =>
+            logger.error("received no result from classifier")
+            None
         }
-        batchStartTime = System.currentTimeMillis()
+
+        // every 1000 items, check if the Spark driver is still running
+        if ((idx + 1) % 1000 == 0) {
+          val duration = System.currentTimeMillis() - batchStartTime
+          logger.debug(s"processed 1000 items using 'classify' method in $duration ms")
+          stopped_? = HttpClientPerJvm.stopped
+          if (stopped_?) {
+            logger.debug("driver status is 'stopped', end processing")
+          }
+          batchStartTime = System.currentTimeMillis()
+        }
+        maybeClassifierResult.map(classifierResult => {
+          Row.fromSeq(row :+ classifierResult.map(r =>
+            Row.fromSeq(r.productIterator.toSeq)))
+        }) match {
+          case Some(classifier) =>
+            resultSeq = resultSeq :+ classifier
+          case None => //nothing
+        }
+      } catch {
+        case e: Exception =>
+          logger.error(s"Failed to classify row.", e)
+      } finally {
+        idx += 1
       }
-      maybeClassifierResult.map(classifierResult => {
-        Row.fromSeq(row :+ classifierResult.map(r =>
-          Row.fromSeq(r.productIterator.toSeq)))
-      })
     }
-    }
+    resultSeq.iterator
   }
 }

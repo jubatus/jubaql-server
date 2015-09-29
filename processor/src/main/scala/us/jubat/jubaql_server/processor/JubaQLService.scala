@@ -19,6 +19,7 @@ import java.net.InetAddress
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
+import collection.JavaConversions._
 
 import com.twitter.finagle.Service
 import com.twitter.util.{Future => TwFuture, Promise => TwPromise}
@@ -27,6 +28,7 @@ import io.netty.util.CharsetUtil
 import RunMode.{Production, Development}
 import us.jubat.jubaql_server.processor.json._
 import us.jubat.jubaql_server.processor.updater._
+import org.apache.hadoop.conf.Configuration
 import org.apache.spark.{SparkFiles, SparkContext}
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
@@ -44,10 +46,11 @@ import org.jboss.netty.handler.codec.http._
 import org.json4s._
 import org.json4s.native.{JsonMethods, Serialization}
 import org.json4s.JsonDSL._
+import org.apache.commons.io._
 import sun.misc.Signal
 import us.jubat.anomaly.AnomalyClient
 import us.jubat.classifier.ClassifierClient
-import us.jubat.common.Datum
+import us.jubat.common.{Datum, ClientBase}
 import us.jubat.recommender.RecommenderClient
 import us.jubat.yarn.client.{JubatusYarnApplication, JubatusYarnApplicationStatus, Resource}
 import us.jubat.yarn.common.{LearningMachineType, Location}
@@ -258,6 +261,95 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
     }
   }
 
+  protected def complementResource(resourceJsonString: Option[String]): Either[(Int, String), Resource] = {
+
+    resourceJsonString match {
+      case Some(strResource) =>
+        JsonMethods.parseOpt(strResource) match {
+          case Some(obj: JObject) =>
+            val masterMemory = checkResourceByInt(obj, "applicationmaster_memory", Resource.defaultMasterMemory, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val proxyMemory = checkResourceByInt(obj, "jubatus_proxy_memory", Resource.defaultJubatusProxyMemory, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val masterCores = checkResourceByInt(obj, "applicationmaster_cores", Resource.defaultMasterCores, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val containerPriority = checkResourceByInt(obj, "container_priority", Resource.defaultPriority, 0) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val containerMemory = checkResourceByInt(obj, "container_memory", Resource.defaultContainerMemory, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val serverMemory = checkResourceByInt(obj, "jubatus_server_memory", Resource.defaultJubatusServerMemory, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val containerCores = checkResourceByInt(obj, "container_cores", Resource.defaultContainerCores, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val containerNodes = checkResourceByStringList(obj, "container_nodes") match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val containerRacks = checkResourceByStringList(obj, "container_racks") match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            Right(Resource(containerPriority, serverMemory, containerCores, masterMemory, proxyMemory, masterCores, containerMemory, containerNodes, containerRacks))
+
+          case None =>
+            Right(Resource())
+        }
+
+      case None =>
+        Right(Resource())
+    }
+  }
+
   protected def takeAction(ast: JubaQLAST): Either[(Int, String), JubaQLResponse] = {
     ast match {
       case anything if isAcceptingQueries.get == false =>
@@ -324,13 +416,23 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
             compact(render(config))
         }
         // TODO: location, resource
-        val resource = Resource(priority = 0, memory = 256, virtualCores = 1)
+        val resource = complementResource(cm.resConfigJson) match {
+          case Left((errCode, errMsg)) =>
+            return Left((errCode, errMsg))
+          case Right(value) =>
+            value
+        }
+
+        val gatewayAddress = scala.util.Properties.propOrElse("jubaql.gateway.address","")
+        val sessionId = scala.util.Properties.propOrElse("jubaql.processor.sessionId","")
+        val applicationName = s"JubatusOnYarn:$gatewayAddress:$sessionId:${jubaType.name}:${cm.modelName}"
+
         val juba: ScFuture[JubatusYarnApplication] = runMode match {
           case RunMode.Production(zookeeper) =>
             val location = zookeeper.map {
               case (host, port) => Location(InetAddress.getByName(host), port)
             }
-            JubatusYarnApplication.start(cm.modelName, jubaType, location, configJsonStr, resource, 2)
+            JubatusYarnApplication.start(cm.modelName, jubaType, location, configJsonStr, resource, 2, applicationName)
           case RunMode.Development =>
             LocalJubatusApplication.start(cm.modelName, jubaType, configJsonStr)
         }
@@ -1164,8 +1266,74 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
             Left((400, msg))
         }
 
+      case SaveModel(modelName, modelPath, modelId) =>
+        models.get(modelName) match {
+          case Some((jubaApp, createModelStmt, machineType)) =>
+            val chkResult = runMode match {
+              case RunMode.Production(zookeeper) =>
+                modelPath.startsWith("hdfs://")
+              case RunMode.Development =>
+                modelPath.startsWith("file://")
+            }
+
+            if (chkResult) {
+              val juba = jubaApp.saveModel(new org.apache.hadoop.fs.Path(modelPath), modelId)
+              juba match {
+                case Failure(t) =>
+                  val msg = s"SAVE MODEL failed: ${t.getMessage}"
+                  logger.error(msg, t)
+                  Left((500, msg))
+
+                case _ =>
+                  Right(StatementProcessed("SAVE MODEL"))
+              }
+            } else {
+              val msg = s"invalid model path ($modelPath)"
+              logger.warn(msg)
+              Left((400, msg))
+            }
+
+          case None =>
+            val msg = s"model '$modelName' does not exist"
+            logger.warn(msg)
+            Left((400, msg))
+        }
+
+      case LoadModel(modelName, modelPath, modelId) =>
+        models.get(modelName) match {
+          case Some((jubaApp, createModelStmt, machineType)) =>
+            val chkResult = runMode match {
+              case RunMode.Production(zookeeper) =>
+                modelPath.startsWith("hdfs://")
+              case RunMode.Development =>
+                modelPath.startsWith("file://")
+            }
+
+            if (chkResult) {
+              val juba = jubaApp.loadModel(new org.apache.hadoop.fs.Path(modelPath), modelId)
+              juba match {
+                case Failure(t) =>
+                  val msg = s"LOAD MODEL failed: ${t.getMessage}"
+                  logger.error(msg, t)
+                  Left((500, msg))
+
+                case _ =>
+                  Right(StatementProcessed("LOAD MODEL"))
+              }
+            } else {
+              val msg = s"invalid model path ($modelPath)"
+              logger.warn(msg)
+              Left((400, msg))
+            }
+
+          case None =>
+            val msg = s"model '$modelName' does not exist"
+            logger.warn(msg)
+            Left((400, msg))
+        }
+
       case other =>
-        val msg = "no handler for " + other
+        val msg = s"no handler for $other"
         logger.error(msg)
         Left((500, msg))
     }
@@ -1458,6 +1626,44 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
         Left((400, msg))
     }
   }
+
+  protected def checkResourceByInt(resObj: JObject, strKey: String, defValue: Int, minValue: Int = 0): Either[(Int, String), Int] = {
+    resObj.values.get(strKey) match {
+      case Some(value) =>
+        try {
+          val numValue = value.asInstanceOf[Number]
+          val intValue = numValue.intValue()
+          if (intValue >= minValue && intValue <= Int.MaxValue) {
+            Right(intValue)
+          } else {
+            Left((400, s"invalid ${strKey} specified in ${minValue} or more and ${Int.MaxValue} or less"))
+          }
+        } catch {
+          case e: Throwable =>
+            logger.error(e.getMessage(), e)
+            Left(400, s"invalid resource (${strKey})")
+        }
+
+      case None =>
+        Right(defValue)
+    }
+  }
+
+  protected def checkResourceByStringList(resObj: JObject, strKey: String): Either[(Int, String), List[String]] = {
+    resObj.values.get(strKey) match {
+      case Some(value) =>
+        try {
+          Right(value.asInstanceOf[List[String]])
+        } catch {
+          case e: Throwable =>
+            logger.error(e.getMessage(), e)
+            Left(400, s"invalid resource (${strKey})")
+        }
+
+      case None =>
+        Right(null)
+    }
+  }
 }
 
 sealed trait RunMode
@@ -1511,8 +1717,8 @@ object LocalJubatusApplication extends LazyLogging {
           namedPipeWriter.close()
         }
 
-        new LocalJubatusApplication(jubatusProcess, aLearningMachineName, jubaCmdName,
-          rpcPort)
+        new LocalJubatusApplication(jubatusProcess, aLearningMachineName, aLearningMachineType,
+            jubaCmdName, rpcPort)
       } finally {
         namedPipe.delete()
       }
@@ -1566,8 +1772,11 @@ object LocalJubatusApplication extends LazyLogging {
 }
 
 // LocalJubatusApplication is not a JubatusYarnApplication, but extends JubatusYarnApplication for implementation.
-class LocalJubatusApplication(jubatus: Process, name: String, jubaCmdName: String, port: Int = 9199)
+class LocalJubatusApplication(jubatus: Process, name: String, aLearningMachineType: LearningMachineType, jubaCmdName: String, port: Int = 9199)
   extends JubatusYarnApplication(Location(InetAddress.getLocalHost, port), List(), null) {
+
+  private val timeoutCount: Int = 180
+  private val fileRe = """file://(.+)""".r
 
   override def status: JubatusYarnApplicationStatus = {
     throw new NotImplementedError("status is not implemented")
@@ -1585,10 +1794,126 @@ class LocalJubatusApplication(jubatus: Process, name: String, jubaCmdName: Strin
   }
 
   override def loadModel(aModelPathPrefix: org.apache.hadoop.fs.Path, aModelId: String): Try[JubatusYarnApplication] = Try {
-    throw new NotImplementedError("loadModel is not implemented")
+    logger.info(s"loadModel path: $aModelPathPrefix, modelId: $aModelId")
+
+    val strHost = jubatusProxy.hostAddress
+    val strPort = jubatusProxy.port
+
+    val srcDir = aModelPathPrefix.toUri().toString() match {
+      case fileRe(filepath) =>
+        val realpath = if (filepath.startsWith("/")) {
+          filepath
+        } else {
+          (new java.io.File(".")).getAbsolutePath + "/" + filepath
+        }
+        "file://" + realpath
+    }
+    logger.debug(s"convert srcDir: $srcDir")
+
+    val localFileSystem = org.apache.hadoop.fs.FileSystem.getLocal(new Configuration())
+    val srcDirectory = localFileSystem.pathToFile(new org.apache.hadoop.fs.Path(srcDir))
+    val srcPath = new java.io.File(srcDirectory, aModelId)
+    if (!srcPath.exists()) {
+      val msg = s"model path does not exist ($srcPath)"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+
+    val srcFile = new java.io.File(srcPath, "0.jubatus")
+    if (!srcFile.exists()) {
+      val msg = s"model file does not exist ($srcFile)"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+
+    val client: ClientBase = aLearningMachineType match {
+      case LearningMachineType.Anomaly =>
+        new AnomalyClient(strHost, strPort, name, timeoutCount)
+
+      case LearningMachineType.Classifier =>
+        new ClassifierClient(strHost, strPort, name, timeoutCount)
+
+      case LearningMachineType.Recommender =>
+        new RecommenderClient(strHost, strPort, name, timeoutCount)
+    }
+
+    val stsMap: java.util.Map[String, java.util.Map[String, String]] = client.getStatus()
+    val baseDir = localFileSystem.pathToFile(new org.apache.hadoop.fs.Path(stsMap.get(s"${strHost}_${strPort}").get("datadir")))
+    val mType = stsMap.get(s"${strHost}_${strPort}").get("type")
+    val dstFile = new java.io.File(baseDir, s"${strHost}_${strPort}_${mType}_${aModelId}.jubatus")
+
+    logger.debug(s"srcFile: $srcFile")
+    logger.debug(s"dstFile: $dstFile")
+
+    FileUtils.copyFile(srcFile, dstFile, false)
+
+    val ret = client.load(aModelId)
+    if (!ret) {
+      val msg = "load RPC failed"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+    this
   }
 
   override def saveModel(aModelPathPrefix: org.apache.hadoop.fs.Path, aModelId: String): Try[JubatusYarnApplication] = Try {
-    throw new NotImplementedError("saveModel is not implemented")
+    logger.info(s"saveModel path: $aModelPathPrefix, modelId: $aModelId")
+
+    val strHost = jubatusProxy.hostAddress
+    val strPort = jubatusProxy.port
+
+    val strId = Math.abs(new Random().nextInt()).toString()
+
+    val result: Map[String, String] = aLearningMachineType match {
+      case LearningMachineType.Anomaly =>
+        val anomaly = new AnomalyClient(strHost, strPort, name, timeoutCount)
+        anomaly.save(strId)
+
+      case LearningMachineType.Classifier =>
+        val classifier = new ClassifierClient(strHost, strPort, name, timeoutCount)
+        classifier.save(strId)
+
+      case LearningMachineType.Recommender =>
+        val recommender = new RecommenderClient(strHost, strPort, name, timeoutCount)
+        recommender.save(strId)
+    }
+
+    logger.debug(s"save method result: $result")
+    if (result.size != 1) {
+      val msg = s"save RPC failed (got ${result.size} results)"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+
+    val strSavePath = result.values.head
+    logger.debug(s"srcFile: $strSavePath")
+
+    val dstDir = aModelPathPrefix.toUri().toString() match {
+      case fileRe(filepath) =>
+        val realpath = if (filepath.startsWith("/")) {
+          filepath
+        } else {
+          s"${(new java.io.File(".")).getAbsolutePath}/$filepath"
+        }
+        s"file://$realpath"
+    }
+    logger.debug(s"convert dstDir: $dstDir")
+
+    val localFileSystem = org.apache.hadoop.fs.FileSystem.getLocal(new Configuration())
+    val dstDirectory = localFileSystem.pathToFile(new org.apache.hadoop.fs.Path(dstDir))
+    val dstPath = new java.io.File(dstDirectory, aModelId)
+    val dstFile = new java.io.File(dstPath, "0.jubatus")
+    logger.debug(s"dstFile: $dstFile")
+
+    if (!dstPath.exists()) {
+      dstPath.mkdirs()
+    } else {
+      if (dstFile.exists()) {
+        dstFile.delete()
+      }
+    }
+
+    FileUtils.moveFile(new java.io.File(strSavePath), dstFile)
+    this
   }
 }

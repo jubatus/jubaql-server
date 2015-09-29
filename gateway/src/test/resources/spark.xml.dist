@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE properties SYSTEM "http://java.sun.com/dtd/properties.dtd">
+<properties>
+<!-- [spark xx path] should be replaced with actual spark path. -->
+<entry key="spark_home_path">[spark home path]</entry>
+</properties>

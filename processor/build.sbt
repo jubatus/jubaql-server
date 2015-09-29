@@ -31,7 +31,7 @@ libraryDependencies ++= Seq(
   "org.slf4j"                  %  "slf4j-api"              % "1.6.4",
   "org.slf4j"                  %  "slf4j-log4j12"          % "1.6.4",
   // Jubatus
-  "us.jubat"                   % "jubatus"                 % "0.7.1"
+  "us.jubat"                   % "jubatus"                 % "0.8.0"
             exclude("org.jboss.netty", "netty"),
   // jubatusonyarn
   "us.jubat"                   %% "jubatus-on-yarn-client"    % "1.1"

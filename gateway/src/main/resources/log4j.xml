@@ -16,7 +16,12 @@
     <logger name="com.ning">
         <level value="info"/>
     </logger>
-
+    <logger name="org.apache.zookeeper">
+        <level value="error"/>
+    </logger>
+    <logger name="org.apache.curator">
+        <level value="error"/>
+    </logger>
     <root>
         <priority value="debug"/>
         <appender-ref ref="console"/>

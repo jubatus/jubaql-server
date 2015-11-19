@@ -49,7 +49,7 @@ import us.jubat.anomaly.AnomalyClient
 import us.jubat.classifier.ClassifierClient
 import us.jubat.common.Datum
 import us.jubat.recommender.RecommenderClient
-import us.jubat.yarn.client.{JubatusYarnApplication, JubatusYarnApplicationStatus, Resource}
+import us.jubat.yarn.client.{JubatusClusterConfiguration, JubatusYarnApplication, JubatusYarnApplicationStatus, Resource}
 import us.jubat.yarn.common.{LearningMachineType, Location}
 
 import scala.collection._
@@ -325,12 +325,14 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
         }
         // TODO: location, resource
         val resource = Resource(priority = 0, memory = 256, virtualCores = 1)
+
+        val gatewayAddress = scala.util.Properties.propOrEmpty("jubaql.gateway.address")
+        val sessionId = scala.util.Properties.propOrEmpty("jubaql.processor.sessionId")
+        val applicationName = s"JubatusOnYarn:$gatewayAddress:$sessionId:${jubaType.name}:${cm.modelName}"
+
         val juba: ScFuture[JubatusYarnApplication] = runMode match {
           case RunMode.Production(zookeeper) =>
-            val location = zookeeper.map {
-              case (host, port) => Location(InetAddress.getByName(host), port)
-            }
-            JubatusYarnApplication.start(cm.modelName, jubaType, location, configJsonStr, resource, 2)
+            JubatusYarnApplication.start(new JubatusClusterConfiguration(cm.modelName, jubaType, zookeeper, Some(configJsonStr), None, resource, 2, Some(applicationName), None))
           case RunMode.Development =>
             LocalJubatusApplication.start(cm.modelName, jubaType, configJsonStr)
         }
@@ -1464,7 +1466,7 @@ sealed trait RunMode
 
 object RunMode {
 
-  case class Production(zookeeper: List[(String, Int)]) extends RunMode
+  case class Production(zookeeper: String) extends RunMode
 
   case object Development extends RunMode
 

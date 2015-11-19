@@ -112,6 +112,7 @@ class GatewayPlan(ipAddress: String, port: Int,
         key2session += (key -> sessionId)
       }
       val callbackUrl = composeCallbackUrl(ipAddress, port, key)
+      val gatewayAddress = s"$ipAddress:$port"
 
       val runtime = Runtime.getRuntime
       val cmd = mutable.ArrayBuffer(f"$sparkDistribution%s/bin/spark-submit",
@@ -119,6 +120,7 @@ class GatewayPlan(ipAddress: String, port: Int,
                                     "--master", "", // set later
                                     "--conf", "", // set later
                                     "--conf", s"log4j.configuration=file:$tmpLog4jPath",
+                                    "--name", s"JubaQLProcessor:$gatewayAddress:$sessionId",
                                     fatjar,
                                     callbackUrl)
       logger.info(f"starting Spark in run mode $runMode%s (session_id: $sessionId%s)")
@@ -133,7 +135,9 @@ class GatewayPlan(ipAddress: String, port: Int,
           // up there.
           cmd.update(6, "spark.driver.extraJavaOptions=-Drun.mode=production " +
             s"-Djubaql.zookeeper=$zookeeper " +
-            s"-Djubaql.checkpointdir=$checkpointDir") // --conf
+            s"-Djubaql.checkpointdir=$checkpointDir "+
+            s"-Djubaql.gateway.address=$gatewayAddress " +
+            s"-Djubaql.processor.sessionId=$sessionId") // --conf
           // also specify the location of the Spark jar file, if given
           val sparkJarParams = sparkJar match {
             case Some(url) => "--conf" :: s"spark.yarn.jar=$url" :: Nil

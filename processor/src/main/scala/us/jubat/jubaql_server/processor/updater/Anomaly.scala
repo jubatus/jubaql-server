@@ -39,22 +39,30 @@ class Anomaly(val jubaHost: String, jubaPort: Int, cm: CreateModel, featureFunct
       logger.debug("driver status is 'stopped', skip processing")
     }
     var batchStartTime = System.currentTimeMillis()
-    iter.takeWhile(_ => !stopped_?).zipWithIndex.foreach { case (row, idx) => {
-      // create datum and send to Jubatus
-      val d = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
-      retry(2, logger)(client.add(d))
+    var idx: Int = 0
+    while (iter.hasNext && !stopped_?) {
+      try {
+        val row = iter.next
+        // create datum and send to Jubatus
+        val d = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
+        retry(2, logger)(client.add(d))
 
-      // every 1000 items, check if the Spark driver is still running
-      if ((idx + 1) % 1000 == 0) {
-        val duration = System.currentTimeMillis() - batchStartTime
-        logger.debug(s"processed 1000 items using 'add' method in $duration ms")
-        stopped_? = HttpClientPerJvm.stopped
-        if (stopped_?) {
-          logger.debug("driver status is 'stopped', end processing")
+        // every 1000 items, check if the Spark driver is still running
+        if ((idx + 1) % 1000 == 0) {
+          val duration = System.currentTimeMillis() - batchStartTime
+          logger.debug(s"processed 1000 items using 'add' method in $duration ms")
+          stopped_? = HttpClientPerJvm.stopped
+          if (stopped_?) {
+            logger.debug("driver status is 'stopped', end processing")
+          }
+          batchStartTime = System.currentTimeMillis()
         }
-        batchStartTime = System.currentTimeMillis()
+      } catch {
+        case e: Exception =>
+          logger.error(s"Failed to add row.", e)
+      } finally {
+        idx += 1
       }
-    }
     }
   }
 
@@ -79,35 +87,46 @@ class Anomaly(val jubaHost: String, jubaPort: Int, cm: CreateModel, featureFunct
       logger.debug("driver status is 'stopped', skip processing")
     }
     var batchStartTime = System.currentTimeMillis()
-    iter.takeWhile(_ => !stopped_?).zipWithIndex.map { case (row, idx) => {
-      // convert to datum and compute score via Jubatus
-      val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
-      // if we return a Float here, this will result in casting exceptions
-      // during processing, so we convert to double
-      val score = retry(2, logger)(client.calcScore(datum).toDouble)
-      // we may get an Infinity result if this row is identical to too many
-      // other items, cf. <https://github.com/jubatus/jubatus_core/issues/130>.
-      // we assume 1.0 instead to avoid weird behavior in the future if the
-      // infinity value appeared in the row.
-      val adjustedScore = if (score.isInfinite) {
-        1.0
-      } else {
-        score
-      }
-
-      // every 1000 items, check if the Spark driver is still running
-      if ((idx + 1) % 1000 == 0) {
-        val duration = System.currentTimeMillis() - batchStartTime
-        logger.debug(s"processed 1000 items using 'calc_score' method in $duration ms")
-        stopped_? = HttpClientPerJvm.stopped
-        if (stopped_?) {
-          logger.debug("driver status is 'stopped', end processing")
+    var resultSeq: Seq[Row] = List.empty[Row]
+    var idx: Int = 0
+    while(iter.hasNext && !stopped_?) {
+      try {
+        val row = iter.next
+        // convert to datum and compute score via Jubatus
+        val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
+        // if we return a Float here, this will result in casting exceptions
+        // during processing, so we convert to double
+        val score = retry(2, logger)(client.calcScore(datum).toDouble)
+        // we may get an Infinity result if this row is identical to too many
+        // other items, cf. <https://github.com/jubatus/jubatus_core/issues/130>.
+        // we assume 1.0 instead to avoid weird behavior in the future if the
+        // infinity value appeared in the row.
+        val adjustedScore = if (score.isInfinite) {
+          1.0
+        } else {
+          score
         }
-        batchStartTime = System.currentTimeMillis()
-      }
 
-      Row.fromSeq(row :+ adjustedScore)
+        // every 1000 items, check if the Spark driver is still running
+        if ((idx + 1) % 1000 == 0) {
+          val duration = System.currentTimeMillis() - batchStartTime
+          logger.debug(s"processed 1000 items using 'calc_score' method in $duration ms")
+          stopped_? = HttpClientPerJvm.stopped
+          if (stopped_?) {
+            logger.debug("driver status is 'stopped', end processing")
+          }
+          batchStartTime = System.currentTimeMillis()
+        }
+
+        val scoreRow = Row.fromSeq(row :+ adjustedScore)
+        resultSeq = resultSeq :+ scoreRow
+      } catch {
+        case e: Exception =>
+          logger.error(s"Failed to calcScore row.", e)
+      } finally {
+        idx += 1
+      }
     }
-    }
+    resultSeq.iterator
   }
 }

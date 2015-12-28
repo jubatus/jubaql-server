@@ -54,27 +54,35 @@ class Recommender(val jubaHost: String, jubaPort: Int, cm: CreateModel,
           logger.debug("driver status is 'stopped', skip processing")
         }
         var batchStartTime = System.currentTimeMillis()
-        iter.takeWhile(_ => !stopped_?).zipWithIndex.foreach { case (row, idx) => {
-          if (!row.isNullAt(idIdx)) {
-            // create datum and send to Jubatus
-            val idValue = row.getString(idIdx)
-            val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
-            retry(2, logger)(client.updateRow(idValue, datum))
+        var idx: Int = 0
+        while (iter.hasNext && !stopped_?) {
+          try {
+            val row = iter.next
+            if (!row.isNullAt(idIdx)) {
+              // create datum and send to Jubatus
+              val idValue = row.getString(idIdx)
+              val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
+              retry(2, logger)(client.updateRow(idValue, datum))
 
-            // every 1000 items, check if the Spark driver is still running
-            if ((idx + 1) % 1000 == 0) {
-              val duration = System.currentTimeMillis() - batchStartTime
-              logger.debug(s"processed 1000 items using 'updateRow' method in $duration ms")
-              stopped_? = HttpClientPerJvm.stopped
-              if (stopped_?) {
-                logger.debug("driver status is 'stopped', end processing")
+              // every 1000 items, check if the Spark driver is still running
+              if ((idx + 1) % 1000 == 0) {
+                val duration = System.currentTimeMillis() - batchStartTime
+                logger.debug(s"processed 1000 items using 'updateRow' method in $duration ms")
+                stopped_? = HttpClientPerJvm.stopped
+                if (stopped_?) {
+                  logger.debug("driver status is 'stopped', end processing")
+                }
+                batchStartTime = System.currentTimeMillis()
               }
-              batchStartTime = System.currentTimeMillis()
+            } else {
+              logger.warn("row %s has a NULL id".format(row))
             }
-          } else {
-            logger.warn("row %s has a NULL id".format(row))
+          } catch {
+            case e: Exception =>
+              logger.error(s"Failed to add row.", e)
+          } finally {
+            idx += 1
           }
-        }
         }
     }
   }
@@ -109,27 +117,38 @@ class Recommender(val jubaHost: String, jubaPort: Int, cm: CreateModel,
       logger.debug("driver status is 'stopped', skip processing")
     }
     var batchStartTime = System.currentTimeMillis()
-    iter.takeWhile(_ => !stopped_?).zipWithIndex.map { case (row, idx) => {
 
-      val id = extractIdOrLabel(idColumnName, rowSchema, row, logger)
-      val fullDatum = retry(2, logger)(client.completeRowFromId(id))
-      val wrappedFullDatum = datumToJson(fullDatum)
+    var resultSeq: Seq[Row] = List.empty[Row]
+    var idx: Int = 0
+    while (iter.hasNext && !stopped_?) {
+      try {
+        val row = iter.next
+        val id = extractIdOrLabel(idColumnName, rowSchema, row, logger)
+        val fullDatum = retry(2, logger)(client.completeRowFromId(id))
+        val wrappedFullDatum = datumToJson(fullDatum)
 
-      // every 1000 items, check if the Spark driver is still running
-      if ((idx + 1) % 1000 == 0) {
-        val duration = System.currentTimeMillis() - batchStartTime
-        logger.debug(s"processed 1000 items using 'complete_row_from_id' method in $duration ms")
-        stopped_? = HttpClientPerJvm.stopped
-        if (stopped_?) {
-          logger.debug("driver status is 'stopped', end processing")
+        // every 1000 items, check if the Spark driver is still running
+        if ((idx + 1) % 1000 == 0) {
+          val duration = System.currentTimeMillis() - batchStartTime
+          logger.debug(s"processed 1000 items using 'complete_row_from_id' method in $duration ms")
+          stopped_? = HttpClientPerJvm.stopped
+          if (stopped_?) {
+            logger.debug("driver status is 'stopped', end processing")
+          }
+          batchStartTime = System.currentTimeMillis()
         }
-        batchStartTime = System.currentTimeMillis()
-      }
 
-      // we must add a nested row (not case class) to allow for nested queries
-      Row.fromSeq(row :+ Row.fromSeq(wrappedFullDatum.productIterator.toSeq))
+        // we must add a nested row (not case class) to allow for nested queries
+       val fromIdRow =  Row.fromSeq(row :+ Row.fromSeq(wrappedFullDatum.productIterator.toSeq))
+        resultSeq = resultSeq :+ fromIdRow
+      } catch {
+        case e: Exception =>
+          logger.error(s"Failed to completeRowFromId row.", e)
+      } finally {
+        idx += 1
+      }
     }
-    }
+    resultSeq.iterator
   }
 
   def completeRowFromDatum(rowSchema: Map[String, (Int, DataType)],
@@ -145,28 +164,39 @@ class Recommender(val jubaHost: String, jubaPort: Int, cm: CreateModel,
       logger.debug("driver status is 'stopped', skip processing")
     }
     var batchStartTime = System.currentTimeMillis()
-    iter.takeWhile(_ => !stopped_?).zipWithIndex.map { case (row, idx) => {
 
-      // convert to datum
-      val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
-      val fullDatum = retry(2, logger)(client.completeRowFromDatum(datum))
-      val wrappedFullDatum = datumToJson(fullDatum)
+    var resultSeq: Seq[Row] = List.empty[Row]
+    var idx: Int = 0
+    while (iter.hasNext && !stopped_?) {
+      try {
+        val row = iter.next
+        // convert to datum
+        val datum = DatumExtractor.extract(cm, rowSchema, row, featureFunctions, logger)
+        val fullDatum = retry(2, logger)(client.completeRowFromDatum(datum))
+        val wrappedFullDatum = datumToJson(fullDatum)
 
-      // every 1000 items, check if the Spark driver is still running
-      if ((idx + 1) % 1000 == 0) {
-        val duration = System.currentTimeMillis() - batchStartTime
-        logger.debug(s"processed 1000 items using 'complete_row_from_datum' method in $duration ms")
-        stopped_? = HttpClientPerJvm.stopped
-        if (stopped_?) {
-          logger.debug("driver status is 'stopped', end processing")
+        // every 1000 items, check if the Spark driver is still running
+        if ((idx + 1) % 1000 == 0) {
+          val duration = System.currentTimeMillis() - batchStartTime
+          logger.debug(s"processed 1000 items using 'complete_row_from_datum' method in $duration ms")
+          stopped_? = HttpClientPerJvm.stopped
+          if (stopped_?) {
+            logger.debug("driver status is 'stopped', end processing")
+          }
+          batchStartTime = System.currentTimeMillis()
         }
-        batchStartTime = System.currentTimeMillis()
-      }
 
-      // we must add a nested row (not case class) to allow for nested queries
-      Row.fromSeq(row :+ Row.fromSeq(wrappedFullDatum.productIterator.toSeq))
+        // we must add a nested row (not case class) to allow for nested queries
+        val fromDatumRow = Row.fromSeq(row :+ Row.fromSeq(wrappedFullDatum.productIterator.toSeq))
+        resultSeq = resultSeq :+ fromDatumRow
+      } catch {
+        case e: Exception =>
+          logger.error(s"Failed to completeRowFromDatum row.", e)
+      } finally {
+        idx += 1
+      }
     }
-    }
+    resultSeq.iterator
   }
 
   protected def datumToJson(datum: Datum): DatumResult = {

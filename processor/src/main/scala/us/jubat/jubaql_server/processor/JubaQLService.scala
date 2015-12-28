@@ -19,6 +19,7 @@ import java.net.InetAddress
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
+import collection.JavaConversions._
 
 import com.twitter.finagle.Service
 import com.twitter.util.{Future => TwFuture, Promise => TwPromise}
@@ -27,6 +28,7 @@ import io.netty.util.CharsetUtil
 import RunMode.{Production, Development}
 import us.jubat.jubaql_server.processor.json._
 import us.jubat.jubaql_server.processor.updater._
+import org.apache.hadoop.conf.Configuration
 import org.apache.spark.{SparkFiles, SparkContext}
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
@@ -44,16 +46,18 @@ import org.jboss.netty.handler.codec.http._
 import org.json4s._
 import org.json4s.native.{JsonMethods, Serialization}
 import org.json4s.JsonDSL._
+import org.apache.commons.io._
 import sun.misc.Signal
 import us.jubat.anomaly.AnomalyClient
 import us.jubat.classifier.ClassifierClient
-import us.jubat.common.Datum
+import us.jubat.common.{Datum, ClientBase}
 import us.jubat.recommender.RecommenderClient
 import us.jubat.yarn.client.{JubatusYarnApplication, JubatusYarnApplicationStatus, Resource}
 import us.jubat.yarn.common.{LearningMachineType, Location}
 
 import scala.collection._
 import scala.collection.convert.decorateAsScala._
+import scala.collection.mutable.{LinkedHashMap, HashMap, ArrayBuffer}
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.concurrent.{Await => ScAwait, Future => ScFuture, Promise => ScPromise, SyncVar}
@@ -90,6 +94,9 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
   // hold names of all usable table-like objects, mapping to their main data source name
   val knownStreamNames: concurrent.Map[String, String] =
     new ConcurrentHashMap[String, String]().asScala
+
+  val streamStates: concurrent.Map[String, StreamState] =
+    new ConcurrentHashMap[String, StreamState]().asScala
 
   // hold feature functions written in JavaScript.
   val featureFunctions: concurrent.Map[String, String] =
@@ -258,6 +265,95 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
     }
   }
 
+  protected def complementResource(resourceJsonString: Option[String]): Either[(Int, String), Resource] = {
+
+    resourceJsonString match {
+      case Some(strResource) =>
+        JsonMethods.parseOpt(strResource) match {
+          case Some(obj: JObject) =>
+            val masterMemory = checkResourceByInt(obj, "applicationmaster_memory", Resource.defaultMasterMemory, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val proxyMemory = checkResourceByInt(obj, "jubatus_proxy_memory", Resource.defaultJubatusProxyMemory, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val masterCores = checkResourceByInt(obj, "applicationmaster_cores", Resource.defaultMasterCores, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val containerPriority = checkResourceByInt(obj, "container_priority", Resource.defaultPriority, 0) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val containerMemory = checkResourceByInt(obj, "container_memory", Resource.defaultContainerMemory, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val serverMemory = checkResourceByInt(obj, "jubatus_server_memory", Resource.defaultJubatusServerMemory, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val containerCores = checkResourceByInt(obj, "container_cores", Resource.defaultContainerCores, 1) match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val containerNodes = checkResourceByStringList(obj, "container_nodes") match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            val containerRacks = checkResourceByStringList(obj, "container_racks") match {
+              case Left((errCode, errMsg)) =>
+                return Left((errCode, errMsg))
+
+              case Right(value) =>
+                value
+            }
+
+            Right(Resource(containerPriority, serverMemory, containerCores, masterMemory, proxyMemory, masterCores, containerMemory, containerNodes, containerRacks))
+
+          case None =>
+            Left((400, "Resource config is not a JSON"))
+        }
+
+      case None =>
+        Right(Resource())
+    }
+  }
+
   protected def takeAction(ast: JubaQLAST): Either[(Int, String), JubaQLResponse] = {
     ast match {
       case anything if isAcceptingQueries.get == false =>
@@ -324,13 +420,23 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
             compact(render(config))
         }
         // TODO: location, resource
-        val resource = Resource(priority = 0, memory = 256, virtualCores = 1)
+        val resource = complementResource(cm.resConfigJson) match {
+          case Left((errCode, errMsg)) =>
+            return Left((errCode, errMsg))
+          case Right(value) =>
+            value
+        }
+
+        val gatewayAddress = scala.util.Properties.propOrElse("jubaql.gateway.address","")
+        val sessionId = scala.util.Properties.propOrElse("jubaql.processor.sessionId","")
+        val applicationName = s"JubatusOnYarn:$gatewayAddress:$sessionId:${jubaType.name}:${cm.modelName}"
+
         val juba: ScFuture[JubatusYarnApplication] = runMode match {
           case RunMode.Production(zookeeper) =>
             val location = zookeeper.map {
               case (host, port) => Location(InetAddress.getByName(host), port)
             }
-            JubatusYarnApplication.start(cm.modelName, jubaType, location, configJsonStr, resource, 2)
+            JubatusYarnApplication.start(cm.modelName, jubaType, location, configJsonStr, resource, 2, applicationName)
           case RunMode.Development =>
             LocalJubatusApplication.start(cm.modelName, jubaType, configJsonStr)
         }
@@ -361,6 +467,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           withStreams(refStreams)(mainDataSource => {
               // register this stream internally
               knownStreamNames += ((streamName, mainDataSource))
+              streamStates += ((streamName, new StreamState(sc, refStreams.toList)))
               preparedStatements.enqueue((mainDataSource, PreparedCreateStreamFromSelect(streamName,
                 selectPlan, refStreams.toList)))
               Right(StatementProcessed("CREATE STREAM"))
@@ -425,6 +532,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           withStreams(refStreams)(mainDataSource => {
               // register this stream internally
               knownStreamNames += ((streamName, mainDataSource))
+              streamStates += ((streamName, new StreamState(sc, refStreams.toList)))
               val flattenedFuncs = checkedFuncSpecs.collect{ case Right(x) => x }
               // build the schema that will result from this statement
               // (add one additional column with the window timestamp if the
@@ -490,6 +598,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
               case Right((modelFut, analyzerFut)) =>
                 // register this stream internally
                 knownStreamNames += ((cs.streamName, mainDataSource))
+                streamStates += ((cs.streamName, new StreamState(sc, List(cs.analyze.data))))
                 // put the UPDATE statement in the statement queue
                 preparedStatements.enqueue((mainDataSource, PreparedCreateStreamFromAnalyze(cs.streamName,
                   cs.analyze.modelName, modelFut,
@@ -574,6 +683,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
             logger.info(s"setting up processing pipeline for data source '$sourceName' " +
               s"with given schema $maybeSchema")
 
+            val readyStreamList = ArrayBuffer.empty[String]
             val rddOperations: mutable.Queue[Either[(Int, String), StreamingContext => Unit]] =
               preparedStatements.filter(_._1 == sourceName).map(_._2).map(stmt => {
               logger.debug(s"deal with $stmt")
@@ -584,8 +694,16 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
                   logger.info(s"adding 'CREATE STREAM $streamName FROM SELECT ...' to pipeline")
                   Right((ssc: StreamingContext) => {
                     logger.debug(s"executing 'CREATE STREAM $streamName FROM SELECT ...'")
-                    SchemaDStream.fromSQL(ssc, sqlc,
-                      selectPlan, Some(streamName))
+                    val selectedStream = SchemaDStream.fromSQL(ssc, sqlc, selectPlan, Some(streamName))
+                    streamStates.get(streamName) match {
+                      case Some(streamState) =>
+                        readyStreamList += streamName
+                        selectedStream.foreachRDD({ rdd =>
+                          streamState.outputCount += rdd.count
+                        })
+                      case None =>
+                        logger.warn(s"Stream(${streamName}) that counts the number of processing not found.")
+                    }
                     ()
                   })
 
@@ -654,8 +772,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
                           schemaRdd.where(postCond)
                         })
                       }).getOrElse(outRowStream)
-                    SchemaDStream(sqlc, filteredOutRowStream, outSchemaStream)
-                      .registerStreamAsTable(streamName)
+                    val filteredOutRowWithSchemaStream = SchemaDStream(sqlc, filteredOutRowStream, outSchemaStream)
+                    streamStates.get(streamName) match {
+                      case Some(streamState) =>
+                        readyStreamList += streamName
+                        filteredOutRowWithSchemaStream.foreachRDD({ rdd =>
+                          streamState.outputCount += rdd.count
+                        })
+                      case None =>
+                        logger.warn(s"Stream(${streamName}) that counts the number of processing not found.")
+                    }
+                    filteredOutRowWithSchemaStream.registerStreamAsTable(streamName)
                     ()
                   }
                   Right(fun)
@@ -694,24 +821,32 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
                           logger.info(s"adding 'CREATE STREAM $streamName FROM ANALYZE ...' to pipeline")
                           Right((ssc: StreamingContext) => {
                             logger.debug(s"executing 'CREATE STREAM $streamName FROM ANALYZE ...'")
-                            SchemaDStream.fromRDDTransformation(ssc, sqlc, dataSourceName, tmpRdd => {
-                            val rddSchema: StructType = tmpRdd.schema
-                            val analyzeFun = UpdaterAnalyzeWrapper(rddSchema, statusUrl,
-                              updater, rpcName)
-                            val newSchema = StructType(rddSchema.fields :+
-                              StructField(newColumn.getOrElse(rpcName),
-                                analyzeFun.dataType, nullable = false))
-                            val newRdd = sqlc.applySchema(tmpRdd.mapPartitionsWithIndex((idx, iter) => {
-                              val formatter = new SimpleDateFormat("HH:mm:ss.SSS")
-                              val hostname = InetAddress.getLocalHost().getHostName()
-                              println("%s @ %s [%s] DEBUG analyzing model from partition %d".format(
-                                formatter.format(new Date), hostname, Thread.currentThread().getName, idx
-                              ))
-                              iter
-                            }).mapPartitions(analyzeFun.apply(_)),
-                              newSchema)
-                            newRdd
-                            }, Some(streamName))
+                            val analyzedStream = SchemaDStream.fromRDDTransformation(ssc, sqlc, dataSourceName, tmpRdd => {
+                              val rddSchema: StructType = tmpRdd.schema
+                              val analyzeFun = UpdaterAnalyzeWrapper(rddSchema, statusUrl,
+                                updater, rpcName)
+                              val newSchema = StructType(rddSchema.fields :+
+                                StructField(newColumn.getOrElse(rpcName),
+                                  analyzeFun.dataType, nullable = false))
+                              val newRdd = sqlc.applySchema(tmpRdd.mapPartitionsWithIndex((idx, iter) => {
+                                val formatter = new SimpleDateFormat("HH:mm:ss.SSS")
+                                val hostname = InetAddress.getLocalHost().getHostName()
+                                println("%s @ %s [%s] DEBUG analyzing model from partition %d".format(
+                                  formatter.format(new Date), hostname, Thread.currentThread().getName, idx))
+                                iter
+                              }).mapPartitions(analyzeFun.apply(_)),
+                                newSchema)
+                              newRdd
+                              }, Some(streamName))
+                            streamStates.get(streamName) match {
+                              case Some(streamState) =>
+                                readyStreamList += streamName
+                                analyzedStream.foreachRDD({ rdd =>
+                                  streamState.outputCount += rdd.count()
+                                })
+                              case None =>
+                                logger.warn(s"Stream(${streamName}) that counts the number of processing not found.")
+                            }
                             ()
                           })
                       }
@@ -832,6 +967,15 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
                 val stopFun = processor.startTableProcessingGeneral(transform,
                   maybeSchema, sourceName)._1
                 stopUpdateFunc = Some(() => stopFun())
+                // set start time to streamState
+                readyStreamList.foreach { startedStreamName =>
+                  streamStates.get(startedStreamName) match {
+                    case Some(state) =>
+                      state.startTime = System.currentTimeMillis()
+                    case None =>
+                      logger.warn(s"${startedStreamName} is undefined")
+                  }
+                }
                 Right(StatementProcessed("START PROCESSING"))
             }
         }
@@ -845,12 +989,15 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
         }
 
       case s: Status =>
-        val dsStatus = sources.mapValues(_._1.state.toString)
-        val jubaStatus = models.mapValues(_._1 match {
-          case dummy: LocalJubatusApplication => "OK"
-          case real => real.status.toString
-        })
-        Right(StatusResponse("STATUS", dsStatus.toMap, jubaStatus.toMap))
+        val dsStatus = getSourcesStatus()
+        val jubaStatus = getModelsStatus()
+        val proStatus = getProcessorStatus()
+        val streamStatus = getStreamStatus()
+        logger.debug(s"dataSourcesStatus: $dsStatus")
+        logger.debug(s"modelsStatus: $jubaStatus")
+        logger.debug(s"processorStatus: $proStatus")
+        logger.debug(s"streamStatus: $streamStatus")
+        Right(StatusResponse("STATUS", dsStatus, jubaStatus, proStatus, streamStatus))
 
       case s: Shutdown =>
         // first set a flag to stop further query processing
@@ -934,20 +1081,20 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           //   (0 until nParams).map(n => s"x$n: AnyRef").mkString(", ")
           // }
           //
-          // def caseTypeString(sqlType: String, scalaType: String, defaultValue: String, nArgs: Int): String = {
+          // def caseTypeString(sqlType: String, scalaType: String, nArgs: Int): String = {
           //   val args = nArgsString(nArgs)
           //   val params = nParamsString(nArgs)
           //   s"""case "$sqlType" =>
           //      |  sqlc.registerFunction(funcName, ($params) => {
           //      |    JavaScriptUDFManager.registerAndCall[$scalaType](funcName,
-          //      |      $nArgs, funcBody, $args).getOrElse($defaultValue)
+          //      |      $nArgs, funcBody, $args)
           //      |  })""".stripMargin
           // }
           //
           // def caseNArgs(nArgs: Int): String = {
-          //   val numericCase = caseTypeString("numeric", "Double", "0.0", nArgs).split("\n").map("    " + _).mkString("\n")
-          //   val stringCase = caseTypeString("string", "String", "\"\"", nArgs).split("\n").map("    " + _).mkString("\n")
-          //   val booleanCase = caseTypeString("boolean", "Boolean", "false", nArgs).split("\n").map("    " + _).mkString("\n")
+          //   val numericCase = caseTypeString("numeric", "Double", nArgs).split("\n").map("    " + _).mkString("\n")
+          //   val stringCase = caseTypeString("string", "String", nArgs).split("\n").map("    " + _).mkString("\n")
+          //   val booleanCase = caseTypeString("boolean", "Boolean", nArgs).split("\n").map("    " + _).mkString("\n")
           //   s"""case $nArgs =>
           //      |  returnType match {
           //      |$numericCase
@@ -964,17 +1111,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
               case "numeric" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Double](funcName,
-                    1, funcBody, x0).getOrElse(0.0)
+                    1, funcBody, x0)
                 })
               case "string" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[String](funcName,
-                    1, funcBody, x0).getOrElse("")
+                    1, funcBody, x0)
                 })
               case "boolean" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Boolean](funcName,
-                    1, funcBody, x0).getOrElse(false)
+                    1, funcBody, x0)
                 })
             }
             Right(StatementProcessed("CREATE FUNCTION"))
@@ -984,17 +1131,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
               case "numeric" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Double](funcName,
-                    2, funcBody, x0, x1).getOrElse(0.0)
+                    2, funcBody, x0, x1)
                 })
               case "string" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[String](funcName,
-                    2, funcBody, x0, x1).getOrElse("")
+                    2, funcBody, x0, x1)
                 })
               case "boolean" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Boolean](funcName,
-                    2, funcBody, x0, x1).getOrElse(false)
+                    2, funcBody, x0, x1)
                 })
             }
             Right(StatementProcessed("CREATE FUNCTION"))
@@ -1004,17 +1151,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
               case "numeric" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Double](funcName,
-                    3, funcBody, x0, x1, x2).getOrElse(0.0)
+                    3, funcBody, x0, x1, x2)
                 })
               case "string" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[String](funcName,
-                    3, funcBody, x0, x1, x2).getOrElse("")
+                    3, funcBody, x0, x1, x2)
                 })
               case "boolean" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Boolean](funcName,
-                    3, funcBody, x0, x1, x2).getOrElse(false)
+                    3, funcBody, x0, x1, x2)
                 })
             }
             Right(StatementProcessed("CREATE FUNCTION"))
@@ -1024,17 +1171,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
               case "numeric" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Double](funcName,
-                    4, funcBody, x0, x1, x2, x3).getOrElse(0.0)
+                    4, funcBody, x0, x1, x2, x3)
                 })
               case "string" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[String](funcName,
-                    4, funcBody, x0, x1, x2, x3).getOrElse("")
+                    4, funcBody, x0, x1, x2, x3)
                 })
               case "boolean" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Boolean](funcName,
-                    4, funcBody, x0, x1, x2, x3).getOrElse(false)
+                    4, funcBody, x0, x1, x2, x3)
                 })
             }
             Right(StatementProcessed("CREATE FUNCTION"))
@@ -1044,17 +1191,17 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
               case "numeric" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef, x4: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Double](funcName,
-                    5, funcBody, x0, x1, x2, x3, x4).getOrElse(0.0)
+                    5, funcBody, x0, x1, x2, x3, x4)
                 })
               case "string" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef, x4: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[String](funcName,
-                    5, funcBody, x0, x1, x2, x3, x4).getOrElse("")
+                    5, funcBody, x0, x1, x2, x3, x4)
                 })
               case "boolean" =>
                 sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef, x4: AnyRef) => {
                   JavaScriptUDFManager.registerAndCall[Boolean](funcName,
-                    5, funcBody, x0, x1, x2, x3, x4).getOrElse(false)
+                    5, funcBody, x0, x1, x2, x3, x4)
                 })
             }
             Right(StatementProcessed("CREATE FUNCTION"))
@@ -1121,7 +1268,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
             // Returns an Int value because registerFunction does not accept a function which returns Unit.
             // The Int value is not used.
             sqlc.registerFunction(funcName, (x0: AnyRef) => {
-              JavaScriptUDFManager.registerAndCall[Int](funcName,
+              JavaScriptUDFManager.registerAndOptionCall[Int](funcName,
                 1, funcBody, x0).getOrElse(0)
             })
             Right(StatementProcessed("CREATE TRIGGER FUNCTION"))
@@ -1129,7 +1276,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           case 2 =>
             // Returns Int for the above reason.
             sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef) => {
-              JavaScriptUDFManager.registerAndCall[Int](funcName,
+              JavaScriptUDFManager.registerAndOptionCall[Int](funcName,
                 2, funcBody, x0, x1).getOrElse(0)
             })
             Right(StatementProcessed("CREATE TRIGGER FUNCTION"))
@@ -1137,7 +1284,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           case 3 =>
             // Returns Int for the above reason.
             sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef) => {
-              JavaScriptUDFManager.registerAndCall[Int](funcName,
+              JavaScriptUDFManager.registerAndOptionCall[Int](funcName,
                 3, funcBody, x0, x1, x2).getOrElse(0)
             })
             Right(StatementProcessed("CREATE TRIGGER FUNCTION"))
@@ -1145,7 +1292,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           case 4 =>
             // Returns Int for the above reason.
             sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef) => {
-              JavaScriptUDFManager.registerAndCall[Int](funcName,
+              JavaScriptUDFManager.registerAndOptionCall[Int](funcName,
                 4, funcBody, x0, x1, x2, x3).getOrElse(0)
             })
             Right(StatementProcessed("CREATE TRIGGER FUNCTION"))
@@ -1153,7 +1300,7 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
           case 5 =>
             // Returns Int for the above reason.
             sqlc.registerFunction(funcName, (x0: AnyRef, x1: AnyRef, x2: AnyRef, x3: AnyRef, x4: AnyRef) => {
-              JavaScriptUDFManager.registerAndCall[Int](funcName,
+              JavaScriptUDFManager.registerAndOptionCall[Int](funcName,
                 5, funcBody, x0, x1, x2, x3, x4).getOrElse(0)
             })
             Right(StatementProcessed("CREATE TRIGGER FUNCTION"))
@@ -1164,8 +1311,74 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
             Left((400, msg))
         }
 
+      case SaveModel(modelName, modelPath, modelId) =>
+        models.get(modelName) match {
+          case Some((jubaApp, createModelStmt, machineType)) =>
+            val chkResult = runMode match {
+              case RunMode.Production(zookeeper) =>
+                modelPath.startsWith("hdfs://")
+              case RunMode.Development =>
+                modelPath.startsWith("file://")
+            }
+
+            if (chkResult) {
+              val juba = jubaApp.saveModel(new org.apache.hadoop.fs.Path(modelPath), modelId)
+              juba match {
+                case Failure(t) =>
+                  val msg = s"SAVE MODEL failed: ${t.getMessage}"
+                  logger.error(msg, t)
+                  Left((500, msg))
+
+                case _ =>
+                  Right(StatementProcessed("SAVE MODEL"))
+              }
+            } else {
+              val msg = s"invalid model path ($modelPath)"
+              logger.warn(msg)
+              Left((400, msg))
+            }
+
+          case None =>
+            val msg = s"model '$modelName' does not exist"
+            logger.warn(msg)
+            Left((400, msg))
+        }
+
+      case LoadModel(modelName, modelPath, modelId) =>
+        models.get(modelName) match {
+          case Some((jubaApp, createModelStmt, machineType)) =>
+            val chkResult = runMode match {
+              case RunMode.Production(zookeeper) =>
+                modelPath.startsWith("hdfs://")
+              case RunMode.Development =>
+                modelPath.startsWith("file://")
+            }
+
+            if (chkResult) {
+              val juba = jubaApp.loadModel(new org.apache.hadoop.fs.Path(modelPath), modelId)
+              juba match {
+                case Failure(t) =>
+                  val msg = s"LOAD MODEL failed: ${t.getMessage}"
+                  logger.error(msg, t)
+                  Left((500, msg))
+
+                case _ =>
+                  Right(StatementProcessed("LOAD MODEL"))
+              }
+            } else {
+              val msg = s"invalid model path ($modelPath)"
+              logger.warn(msg)
+              Left((400, msg))
+            }
+
+          case None =>
+            val msg = s"model '$modelName' does not exist"
+            logger.warn(msg)
+            Left((400, msg))
+        }
+
       case other =>
-        val msg = "no handler for " + other
+        val msg = s"no handler for $other"
         logger.error(msg)
         Left((500, msg))
     }
@@ -1458,6 +1671,148 @@ class JubaQLService(sc: SparkContext, runMode: RunMode, checkpointDir: String)
         Left((400, msg))
     }
   }
+
+  protected def checkResourceByInt(resObj: JObject, strKey: String, defValue: Int, minValue: Int = 0): Either[(Int, String), Int] = {
+    resObj.values.get(strKey) match {
+      case Some(value) =>
+        try {
+          val numValue = value.asInstanceOf[Number]
+          val intValue = numValue.intValue()
+          if (intValue >= minValue && intValue <= Int.MaxValue) {
+            Right(intValue)
+          } else {
+            Left((400, s"invalid ${strKey} specified in ${minValue} or more and ${Int.MaxValue} or less"))
+          }
+        } catch {
+          case e: Throwable =>
+            logger.error(e.getMessage(), e)
+            Left(400, s"invalid resource (${strKey})")
+        }
+
+      case None =>
+        Right(defValue)
+    }
+  }
+
+  protected def checkResourceByStringList(resObj: JObject, strKey: String): Either[(Int, String), List[String]] = {
+    resObj.values.get(strKey) match {
+      case Some(value) =>
+        try {
+          Right(value.asInstanceOf[List[String]])
+        } catch {
+          case e: Throwable =>
+            logger.error(e.getMessage(), e)
+            Left(400, s"invalid resource (${strKey})")
+        }
+
+      case None =>
+        Right(null)
+    }
+  }
+
+  protected def getSourcesStatus(): Map[String, Any] = {
+    var sourceMap: LinkedHashMap[String, Any] = new LinkedHashMap()
+    sources.foreach {
+      case (sourceName, (hybridProcessor, schema)) =>
+        sourceMap.put(sourceName, hybridProcessor.getStatus())
+    }
+    sourceMap
+  }
+
+  protected def getModelsStatus(): Map[String, Any] = {
+    var jubaStatus: LinkedHashMap[String, Any] = new LinkedHashMap()
+    models.foreach {
+      case (modelName, (jubaApp, createModel, jubaType)) =>
+        var configMap: LinkedHashMap[String, Any] = new LinkedHashMap()
+        configMap.put("jubatusConfig", createModel.configJson)
+        configMap.put("resourceConfig", createModel.resConfigJson.getOrElse(""))
+
+        var jubatusAppStatusMap: LinkedHashMap[String, Any] = new LinkedHashMap()
+        val jubatusAppStatus = jubaApp.status
+
+        var proxyStatus: Map[String, Map[String, String]] = new HashMap()
+        if (jubatusAppStatus.jubatusProxy != null) {
+          proxyStatus = jubatusAppStatus.jubatusProxy.asScala.mapValues(map => map.asScala)
+        }
+        var serversStatus: Map[String, Map[String, String]] = new HashMap()
+        if (jubatusAppStatus.jubatusServers != null) {
+          serversStatus = jubatusAppStatus.jubatusServers.asScala.mapValues(map => map.asScala)
+        }
+        val yarnAppStatus: LinkedHashMap[String, Any] = new LinkedHashMap()
+        if (jubatusAppStatus.yarnApplication != null) {
+          jubatusAppStatus.yarnApplication.foreach {
+            case (key, value) =>
+              if (key == "applicationReport") {
+                yarnAppStatus.put(key, value.toString())
+              } else {
+                yarnAppStatus.put(key, value)
+              }
+          }
+        }
+
+        jubatusAppStatusMap.put("jubatusProxy", proxyStatus)
+        jubatusAppStatusMap.put("jubatusServers", serversStatus)
+        jubatusAppStatusMap.put("jubatusOnYarn", yarnAppStatus)
+
+        var modelMap: LinkedHashMap[String, Any] = new LinkedHashMap()
+        modelMap.put("learningMachineType", jubaType.name)
+        modelMap.put("config", configMap)
+        modelMap.put("jubatusYarnApplicationStatus", jubatusAppStatusMap)
+        jubaStatus.put(modelName, modelMap)
+    }
+    jubaStatus
+  }
+
+  protected def getProcessorStatus(): Map[String, Any] = {
+    val curTime = System.currentTimeMillis()
+    val opTime = curTime - sc.startTime
+    val runtime = Runtime.getRuntime()
+    val usedMemory = runtime.totalMemory() - runtime.freeMemory()
+
+    var proStatusMap: LinkedHashMap[String, Any] = new LinkedHashMap()
+    proStatusMap.put("applicationId", sc.applicationId)
+    proStatusMap.put("startTime", sc.startTime)
+    proStatusMap.put("currentTime", curTime)
+    proStatusMap.put("opratingTime", opTime)
+    proStatusMap.put("virtualMemory", runtime.totalMemory())
+    proStatusMap.put("usedMemory", usedMemory)
+
+    proStatusMap
+  }
+
+  def getStreamStatus(): Map[String, Map[String, Any]] = {
+    // Map{key = streamName, value = Map{key = statusName, value = statusValue}}
+    var streamStatusMap: Map[String, Map[String, Any]] = Map.empty[String, Map[String, Any]]
+    streamStates.foreach(streamState => {
+      val stateValue = streamState._2
+      var totalInputCount = 0L
+      // calculate input count of each stream
+      stateValue.inputStreamList.foreach { inputStreamName =>
+        // add output count of datasource to totalInputCount
+        sources.get(inputStreamName) match {
+          case Some(source) =>
+            totalInputCount += source._1.storageCount.value
+            totalInputCount += source._1.streamCount.value
+          case None =>
+            logger.warn(s"input datasource(${inputStreamName}) of stream(${streamState._1}) was not found.")
+        }
+        // add output count of user define stream to totalInputCount
+        streamStates.get(inputStreamName) match {
+          case Some(inputStreamState) =>
+            totalInputCount += inputStreamState.outputCount.value
+          case None =>
+            logger.warn(s"input stream(${inputStreamName}) of stream(${streamState._1}) was not found.")
+        }
+      }
+      stateValue.inputCount = totalInputCount
+      val stateMap: scala.collection.mutable.Map[String, Any] = new scala.collection.mutable.LinkedHashMap[String, Any]
+      stateMap.put("stream_start", stateValue.startTime)
+      stateMap.put("input_count", totalInputCount)
+      stateMap.put("output_count", stateValue.outputCount.value)
+      streamStatusMap += streamState._1 -> stateMap
+    })
+    streamStatusMap
+  }
 }
 
 sealed trait RunMode
@@ -1468,6 +1823,7 @@ object RunMode {
 
   case object Development extends RunMode
 
+  case object Test extends RunMode
 }
 
 object LocalJubatusApplication extends LazyLogging {
@@ -1511,8 +1867,8 @@ object LocalJubatusApplication extends LazyLogging {
           namedPipeWriter.close()
         }
 
-        new LocalJubatusApplication(jubatusProcess, aLearningMachineName, jubaCmdName,
-          rpcPort)
+        new LocalJubatusApplication(jubatusProcess, aLearningMachineName, aLearningMachineType,
+            jubaCmdName, rpcPort)
       } finally {
         namedPipe.delete()
       }
@@ -1566,11 +1922,30 @@ object LocalJubatusApplication extends LazyLogging {
 }
 
 // LocalJubatusApplication is not a JubatusYarnApplication, but extends JubatusYarnApplication for implementation.
-class LocalJubatusApplication(jubatus: Process, name: String, jubaCmdName: String, port: Int = 9199)
+class LocalJubatusApplication(jubatus: Process, name: String, aLearningMachineType: LearningMachineType, jubaCmdName: String, port: Int = 9199)
   extends JubatusYarnApplication(Location(InetAddress.getLocalHost, port), List(), null) {
 
+  private val timeoutCount: Int = 180
+  private val fileRe = """file://(.+)""".r
+
   override def status: JubatusYarnApplicationStatus = {
-    throw new NotImplementedError("status is not implemented")
+    logger.info("status LocalJubatusApplication")
+
+    val strHost = jubatusProxy.hostAddress
+    val strPort = jubatusProxy.port
+    val client: ClientBase = aLearningMachineType match {
+      case LearningMachineType.Anomaly =>
+        new AnomalyClient(strHost, strPort, name, timeoutCount)
+
+      case LearningMachineType.Classifier =>
+        new ClassifierClient(strHost, strPort, name, timeoutCount)
+
+      case LearningMachineType.Recommender =>
+        new RecommenderClient(strHost, strPort, name, timeoutCount)
+    }
+
+    val stsMap: java.util.Map[String, java.util.Map[String, String]] = client.getStatus()
+    JubatusYarnApplicationStatus(null, stsMap, null)
   }
 
   override def stop(): scala.concurrent.Future[Unit] = scala.concurrent.Future {
@@ -1585,10 +1960,174 @@ class LocalJubatusApplication(jubatus: Process, name: String, jubaCmdName: Strin
   }
 
   override def loadModel(aModelPathPrefix: org.apache.hadoop.fs.Path, aModelId: String): Try[JubatusYarnApplication] = Try {
-    throw new NotImplementedError("loadModel is not implemented")
+    logger.info(s"loadModel path: $aModelPathPrefix, modelId: $aModelId")
+
+    val strHost = jubatusProxy.hostAddress
+    val strPort = jubatusProxy.port
+
+    val srcDir = aModelPathPrefix.toUri().toString() match {
+      case fileRe(filepath) =>
+        val realpath = if (filepath.startsWith("/")) {
+          filepath
+        } else {
+          (new java.io.File(".")).getAbsolutePath + "/" + filepath
+        }
+        "file://" + realpath
+    }
+    logger.debug(s"convert srcDir: $srcDir")
+
+    val localFileSystem = org.apache.hadoop.fs.FileSystem.getLocal(new Configuration())
+    val srcDirectory = localFileSystem.pathToFile(new org.apache.hadoop.fs.Path(srcDir))
+    val srcPath = new java.io.File(srcDirectory, aModelId)
+    if (!srcPath.exists()) {
+      val msg = s"model path does not exist ($srcPath)"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+
+    val srcFile = new java.io.File(srcPath, "0.jubatus")
+    if (!srcFile.exists()) {
+      val msg = s"model file does not exist ($srcFile)"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+
+    val client: ClientBase = aLearningMachineType match {
+      case LearningMachineType.Anomaly =>
+        new AnomalyClient(strHost, strPort, name, timeoutCount)
+
+      case LearningMachineType.Classifier =>
+        new ClassifierClient(strHost, strPort, name, timeoutCount)
+
+      case LearningMachineType.Recommender =>
+        new RecommenderClient(strHost, strPort, name, timeoutCount)
+    }
+
+    val stsMap: java.util.Map[String, java.util.Map[String, String]] = client.getStatus()
+    logger.debug(s"getStatus method result: $stsMap")
+    if (stsMap.size != 1) {
+      val msg = s"getStatus RPC failed (got ${stsMap.size} results)"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+
+    val strHostPort = stsMap.keys.head
+    logger.debug(s"key[Host_Port]: $strHostPort")
+
+    val baseDir = localFileSystem.pathToFile(new org.apache.hadoop.fs.Path(stsMap.get(strHostPort).get("datadir")))
+    val mType = stsMap.get(strHostPort).get("type")
+    val dstFile = new java.io.File(baseDir, s"${strHostPort}_${mType}_${aModelId}.jubatus")
+
+    logger.debug(s"srcFile: $srcFile")
+    logger.debug(s"dstFile: $dstFile")
+
+    FileUtils.copyFile(srcFile, dstFile, false)
+
+    val ret = client.load(aModelId)
+    if (!ret) {
+      val msg = "load RPC failed"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+    this
   }
 
   override def saveModel(aModelPathPrefix: org.apache.hadoop.fs.Path, aModelId: String): Try[JubatusYarnApplication] = Try {
-    throw new NotImplementedError("saveModel is not implemented")
+    logger.info(s"saveModel path: $aModelPathPrefix, modelId: $aModelId")
+
+    val strHost = jubatusProxy.hostAddress
+    val strPort = jubatusProxy.port
+
+    val strId = Math.abs(new Random().nextInt()).toString()
+
+    val result: java.util.Map[String, String] = aLearningMachineType match {
+      case LearningMachineType.Anomaly =>
+        val anomaly = new AnomalyClient(strHost, strPort, name, timeoutCount)
+        anomaly.save(strId)
+
+      case LearningMachineType.Classifier =>
+        val classifier = new ClassifierClient(strHost, strPort, name, timeoutCount)
+        classifier.save(strId)
+
+      case LearningMachineType.Recommender =>
+        val recommender = new RecommenderClient(strHost, strPort, name, timeoutCount)
+        recommender.save(strId)
+    }
+
+    logger.debug(s"save method result: $result")
+    if (result.size != 1) {
+      val msg = s"save RPC failed (got ${result.size} results)"
+      logger.error(msg)
+      throw new RuntimeException(msg)
+    }
+
+    val strSavePath = result.values.head
+    logger.debug(s"srcFile: $strSavePath")
+
+    val dstDir = aModelPathPrefix.toUri().toString() match {
+      case fileRe(filepath) =>
+        val realpath = if (filepath.startsWith("/")) {
+          filepath
+        } else {
+          s"${(new java.io.File(".")).getAbsolutePath}/$filepath"
+        }
+        s"file://$realpath"
+    }
+    logger.debug(s"convert dstDir: $dstDir")
+
+    val localFileSystem = org.apache.hadoop.fs.FileSystem.getLocal(new Configuration())
+    val dstDirectory = localFileSystem.pathToFile(new org.apache.hadoop.fs.Path(dstDir))
+    val dstPath = new java.io.File(dstDirectory, aModelId)
+    val dstFile = new java.io.File(dstPath, "0.jubatus")
+    logger.debug(s"dstFile: $dstFile")
+
+    if (!dstPath.exists()) {
+      dstPath.mkdirs()
+    } else {
+      if (dstFile.exists()) {
+        dstFile.delete()
+      }
+    }
+
+    FileUtils.moveFile(new java.io.File(strSavePath), dstFile)
+    this
   }
+}
+
+object TestJubatusApplication extends LazyLogging {
+  def start(aLearningMachineName: String,
+    aLearningMachineType: LearningMachineType): scala.concurrent.Future[us.jubat.yarn.client.JubatusYarnApplication] = {
+    scala.concurrent.Future {
+      new TestJubatusApplication(aLearningMachineName, aLearningMachineType)
+    }
+  }
+}
+
+class TestJubatusApplication(name: String, aLearningMachineType: LearningMachineType)
+    extends JubatusYarnApplication(null, List(), null) {
+
+  override def status: JubatusYarnApplicationStatus = {
+    logger.info("status TestJubatusApplication")
+
+    val dmyProxy: java.util.Map[String, java.util.Map[String, String]] = new java.util.HashMap()
+    val dmyProxySub: java.util.Map[String, String] = new java.util.HashMap()
+    dmyProxySub.put("PROGNAME", "jubaclassifier_proxy")
+    dmyProxy.put("dummyProxy", dmyProxySub)
+    val dmyServer: java.util.Map[String, java.util.Map[String, String]] = new java.util.HashMap()
+    val dmyServerSub: java.util.Map[String, String] = new java.util.HashMap()
+    dmyServerSub.put("PROGNAME", "jubaclassifier")
+    dmyServer.put("dummyServer", dmyServerSub)
+    val dmyApp: java.util.Map[String, Any] = new java.util.HashMap()
+    dmyApp.put("applicationReport", "applicationId{ id: 1 cluster_timestamp: 99999999}")
+    dmyApp.put("currentTime", System.currentTimeMillis())
+    dmyApp.put("oparatingTime", 1000)
+    JubatusYarnApplicationStatus(dmyProxy, dmyServer, dmyApp)
+  }
+}
+
+class StreamState(sc: SparkContext, inputStreams: List[String]) {
+  var inputCount = 0L
+  val outputCount = sc.accumulator(0L)
+  val inputStreamList = inputStreams
+  var startTime = 0L
 }

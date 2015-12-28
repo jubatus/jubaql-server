@@ -103,7 +103,7 @@ class JubaQLParserSpec extends FlatSpec {
     // use single quotation
     val result: Option[JubaQLAST] = parser.parse(
       """
-      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH id CONFIG '{"test": 123}'
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}'
       """.stripMargin
     )
 
@@ -112,7 +112,7 @@ class JubaQLParserSpec extends FlatSpec {
     create.algorithm shouldBe "CLASSIFIER"
     create.modelName shouldBe "test1"
     create.labelOrId shouldBe Some(("label", "l"))
-    create.featureExtraction shouldBe List((WildcardAnyParameter, "id"))
+    create.featureExtraction shouldBe List((WildcardAnyParameter, "fex"))
     create.configJson shouldBe """{"test": 123}"""
     //create.specifier shouldBe List(("id", List("id")), ("datum", List("a", "b")))
   }
@@ -122,7 +122,7 @@ class JubaQLParserSpec extends FlatSpec {
     // use single quotation
     val result: Option[JubaQLAST] = parser.parse(
       """
-      |CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH id CONFIG '{"test":
+      |CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test":
       |123}'
       """.stripMargin
     )
@@ -132,7 +132,7 @@ class JubaQLParserSpec extends FlatSpec {
     create.algorithm shouldBe "CLASSIFIER"
     create.modelName shouldBe "test1"
     create.labelOrId shouldBe Some(("label", "l"))
-    create.featureExtraction shouldBe List((WildcardAnyParameter, "id"))
+    create.featureExtraction shouldBe List((WildcardAnyParameter, "fex"))
     create.configJson shouldBe "{\"test\":\n123}"
     //create.specifier shouldBe List(("id", List("id")), ("datum", List("a", "b")))
   }
@@ -173,6 +173,51 @@ class JubaQLParserSpec extends FlatSpec {
     create.featureExtraction shouldBe List((WildcardWithPrefixParameter("名前"), "アイディー"))
     create.configJson shouldBe """{"test": 123}"""
     //create.specifier shouldBe List(("id", List("id")), ("datum", List("a", "b")))
+  }
+
+  it should "recognize CREATE MODEL without recource config" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}'
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.resConfigJson shouldBe None
+  }
+
+  it should "recognize CREATE MODEL for recource config" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' RESOURCE CONFIG '{"applicationmaster_memory": 256}'
+      """.stripMargin)
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.resConfigJson shouldBe Some("""{"applicationmaster_memory": 256}""")
+  }
+
+  it should "not recognize CREATE MODEL for recource config without value" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    var result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' RESOURCE CONFIG
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "not recognize CREATE MODEL for recource config without 'CONFIG'" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    var result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' RESOURCE '{"applicationmaster_memory": 256}'
+      """.stripMargin)
+    result shouldBe (None)
   }
 
   it should "recognize CREATE STREAM FROM SELECT" taggedAs (LocalTest) in {
@@ -224,7 +269,7 @@ class JubaQLParserSpec extends FlatSpec {
       |  SLIDING WINDOW (SIZE 4 ADVANCE 3 TUPLES)
       |  OVER source
       |  WITH fourier(some_col) AS fourier_coeffs
-      |  WHERE id % 2 = 0
+      |  WHERE fid % 2 = 0
       |  HAVING fourier_coeffs = 2
     """.stripMargin)
     result shouldNot be(None)
@@ -456,5 +501,185 @@ class JubaQLParserSpec extends FlatSpec {
     cf.args shouldBe List(("arg", "string"))
     cf.lang shouldBe "JavaScript"
     cf.body shouldBe " var n = 1; return n; "
+  }
+
+  // TODO write more SAVE MODEL tests
+
+  it should "recognize SAVE MODEL for Development Mode" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING "file:///home/data/models" AS test001
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[SaveModel]
+    sm.modelName shouldBe "test"
+    sm.modelPath shouldBe """file:///home/data/models"""
+    sm.modelId shouldBe "test001"
+  }
+
+  it should "recognize SAVE MODEL for Production Mode" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING "hdfs:///data/models" AS id
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[SaveModel]
+    sm.modelName shouldBe "test"
+    sm.modelPath shouldBe """hdfs:///data/models"""
+    sm.modelId shouldBe "id"
+  }
+
+  it should "not recognize SAVE MODEL without ModelName" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL USING "hdfs:///data/models" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize SAVE MODEL ModelName is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL "" USING "hdfs:///data/models" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize SAVE MODEL without ModelPath" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING  AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize SAVE MODEL ModelPath is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING "" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize SAVE MODEL without ModelId" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING "hdfs:///data/models" AS
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize SAVE MODEL ModelId is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING "hdfs:///data/models" AS ""
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  // TODO write more LOAD MODEL tests
+
+  it should "recognize LOAD MODEL Development Mode/file:scheme" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING "file:///home/data/models" AS test001
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[LoadModel]
+    sm.modelName shouldBe "test"
+    sm.modelPath shouldBe """file:///home/data/models"""
+    sm.modelId shouldBe "test001"
+  }
+
+  it should "recognize LOAD MODEL Production Mode/hdfs:scheme" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING "hdfs:///data/models" AS id
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[LoadModel]
+    sm.modelName shouldBe "test"
+    sm.modelPath shouldBe """hdfs:///data/models"""
+    sm.modelId shouldBe "id"
+  }
+
+  it should "not recognize LOAD MODEL without ModelName" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL USING "hdfs:///data/models" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize LOAD MODEL ModelName is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL "" USING "hdfs:///data/models" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize LOAD MODEL without ModelPath" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING  AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize LOAD MODEL ModelPath is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING "" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize LOAD MODEL without ModelId" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING "hdfs:///data/models" AS
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize LOAD MODEL ModelId is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING "hdfs:///data/models" AS ""
+      """.stripMargin)
+
+    result should be(None)
   }
 }

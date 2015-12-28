@@ -31,14 +31,23 @@ CreateModel(algorithm: String,
             modelName: String,
             labelOrId: Option[(String, String)],
             featureExtraction: List[(FeatureFunctionParameters, String)],
-            configJson: String) extends JubaQLAST {
-  override def toString: String = "CreateModel(%s,%s,%s,%s,%s)".format(
+            configJson: String,
+            resConfigJson: Option[String] = None) extends JubaQLAST {
+  override def toString: String = "CreateModel(%s,%s,%s,%s,%s,%s)".format(
     algorithm,
     modelName,
     labelOrId,
     featureExtraction,
     if (configJson.size > 13) configJson.take(5) + "..." + configJson.takeRight(5)
-    else configJson
+    else configJson,
+    resConfigJson match {
+      case Some(res) =>
+        if (res.size > 13) res.take(5) + "..." + res.takeRight(5)
+        else res
+
+      case None =>
+        resConfigJson
+    }
   )
 }
 
@@ -75,3 +84,7 @@ case class CreateFeatureFunction(funcName: String, args: List[(String, String)],
 
 case class CreateTriggerFunction(funcName: String, args: List[(String, String)],
                                  lang: String, body: String) extends JubaQLAST
+
+case class SaveModel(modelName: String, modelPath: String, modelId: String) extends JubaQLAST
+
+case class LoadModel(modelName: String, modelPath: String, modelId: String) extends JubaQLAST

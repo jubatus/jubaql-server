@@ -33,7 +33,7 @@ import org.apache.spark.streaming.kafka.KafkaUtils
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.SparkContext._
 import kafka.serializer.StringDecoder
-import scala.collection.mutable.Queue
+import scala.collection.mutable.{Queue, LinkedHashMap}
 import org.apache.spark.sql.{SchemaRDD, SQLContext}
 import org.apache.spark.sql.catalyst.types.StructType
 import org.json4s.JValue
@@ -50,6 +50,17 @@ case object Initialized extends ProcessorState
 case object Running extends ProcessorState
 
 case object Finished extends ProcessorState
+
+// an object describing the phase of the processing
+sealed abstract class ProcessingPhase(val name: String) {
+  def getPhaseName(): String = { name }
+}
+
+case object StopPhase extends ProcessingPhase("Stop")
+
+case object StoragePhase extends ProcessingPhase("Storage")
+
+case object StreamPhase extends ProcessingPhase("Stream")
 
 class HybridProcessor(sc: SparkContext,
                       sqlc: SQLContext,
@@ -156,6 +167,26 @@ class HybridProcessor(sc: SparkContext,
   def state: ProcessorState = synchronized {
     _state
   }
+
+  // phase of the processing
+  protected var _phase: ProcessingPhase = StopPhase
+
+  protected def setPhase(newPhase: ProcessingPhase) = synchronized {
+    _phase = newPhase
+  }
+
+  def phase: ProcessingPhase = synchronized {
+    _phase
+  }
+
+  // latest time-stamp
+  var latestStaticTimestamp = sc.accumulator[Option[IdType]](None)(new MaxOptionAccumulatorParam[IdType])
+  var latestStreamTimestamp = sc.accumulator[Option[IdType]](None)(new MaxOptionAccumulatorParam[IdType])
+
+  var storageCount = sc.accumulator(0L)
+  var streamCount = sc.accumulator(0L)
+  var staticStartTime = 0L
+  var streamStartTime = 0L
 
   /**
    * Start hybrid processing using the given RDD[JValue] operation.
@@ -356,9 +387,10 @@ class HybridProcessor(sc: SparkContext,
 
     // keep track of the maximal ID seen during processing
     val maxStaticId = sc.accumulator[Option[IdType]](None)(new MaxOptionAccumulatorParam[IdType])
-    val countStatic = sc.accumulator(0L)
+    latestStaticTimestamp = maxStaticId
+    storageCount = sc.accumulator(0L)
     val maxStreamId = sc.accumulator[Option[IdType]](None)(new MaxOptionAccumulatorParam[IdType])
-    val countStream = sc.accumulator(0L)
+    streamCount = sc.accumulator(0L)
 
     // processing of static data
     val repartitionedData = if (_master == "yarn-cluster" && totalNumCores > 0) {
@@ -379,7 +411,7 @@ class HybridProcessor(sc: SparkContext,
     }).foreachRDD(rdd => {
       val count = rdd.count()
       // we count the number of total input rows (on the driver)
-      countStatic += count
+      storageCount += count
       // stop processing of static data if there are no new files
       if (count == 0) {
         logger.info(s"processed $count (static) lines, looks like done")
@@ -396,10 +428,11 @@ class HybridProcessor(sc: SparkContext,
 
     // start first StreamingContext
     logger.info("starting static data processing")
-    val staticStartTime = System.currentTimeMillis()
+    staticStartTime = System.currentTimeMillis()
     var staticRunTime = 0L
-    var streamStartTime = -1L
     var streamRunTime = 0L
+    setPhase(StoragePhase)
+
     ssc_.start()
     val staticStreamingContext = ssc_
 
@@ -445,7 +478,7 @@ class HybridProcessor(sc: SparkContext,
       // NB. This is a separate thread. In functions that will be serialized,
       // you cannot necessarily use variables from outside this thread.
       val localExtractId = extractId
-      val localCountStream = countStream
+      val localCountStream = streamCount
       val localMaxStreamId = maxStreamId
       logger.debug("hello from thread to start stream processing")
       staticStreamingContext.awaitTermination()
@@ -454,9 +487,11 @@ class HybridProcessor(sc: SparkContext,
       // to continue with real stream processing only if the static processing
       // was completed successfully.
       val largestStaticItemId = maxStaticId.value
+      latestStreamTimestamp = maxStreamId
+
       staticRunTime = System.currentTimeMillis() - staticStartTime
       logger.debug("static processing ended after %d items and %s ms, largest seen ID: %s".format(
-        countStatic.value, staticRunTime, largestStaticItemId))
+        storageCount.value, staticRunTime, largestStaticItemId))
       logger.debug("sleeping a bit to allow Spark to settle")
       runMode match {
         case Development =>
@@ -535,31 +570,37 @@ class HybridProcessor(sc: SparkContext,
               } else {
                 logger.info("starting stream processing")
                 streamStartTime = System.currentTimeMillis()
+                setPhase(StreamPhase)
                 ssc_.start()
               }
             }
           case Nil =>
             logger.info("not starting stream processing " +
               "(no stream source given)")
+            setPhase(StopPhase)
             setState(Finished)
           case _ =>
             logger.error("not starting stream processing " +
               "(multiple streams not implemented)")
+            setPhase(StopPhase)
             setState(Finished)
         }
       } else if (staticProcessingComplete && userStoppedProcessing) {
         logger.info("static processing was stopped by user, " +
           "not setting up stream")
+        setPhase(StopPhase)
         setState(Finished)
       } else {
         logger.warn("static processing did not complete successfully, " +
           "not setting up stream")
+        setPhase(StopPhase)
         setState(Finished)
       }
       logger.debug("bye from thread to start stream processing")
     } onFailure {
       case error: Throwable =>
         logger.error("Error while setting up stream processing", error)
+        setPhase(StopPhase)
         setState(Finished)
     }
 
@@ -578,11 +619,12 @@ class HybridProcessor(sc: SparkContext,
         streamRunTime = System.currentTimeMillis() - streamStartTime
       }
       logger.info(("processed %s items in %s ms (static) and %s items in " +
-        "%s ms (stream)").format(countStatic.value, staticRunTime,
-          countStream.value, streamRunTime))
+        "%s ms (stream)").format(storageCount.value, staticRunTime,
+          streamCount.value, streamRunTime))
+      setPhase(StopPhase)
       setState(Finished)
-      (ProcessingInformation(countStatic.value, staticRunTime, maxStaticId.value),
-        ProcessingInformation(countStream.value, streamRunTime, maxStreamId.value))
+      (ProcessingInformation(storageCount.value, staticRunTime, maxStaticId.value),
+        ProcessingInformation(streamCount.value, streamRunTime, maxStreamId.value))
     }, () => maxStaticId.value)
   }
 
@@ -606,5 +648,35 @@ class HybridProcessor(sc: SparkContext,
         logger.info(s"streaming context was stopped after exception")
         throw e
     }
+  }
+
+  def getStatus(): LinkedHashMap[String, Any] = {
+    var storageMap: LinkedHashMap[String, Any] = new LinkedHashMap()
+    storageMap.put("path", storageLocation)
+    storageMap.put("storage_start", staticStartTime)
+    storageMap.put("storage_count", storageCount.value)
+
+    var streamMap: LinkedHashMap[String, Any] = new LinkedHashMap()
+    streamMap.put("path", streamLocations)
+    streamMap.put("stream_start", streamStartTime)
+    streamMap.put("stream_count", streamCount.value)
+
+    var stsMap: LinkedHashMap[String, Any] = new LinkedHashMap()
+    stsMap.put("state", _state.toString())
+    stsMap.put("process_phase", _phase.getPhaseName())
+
+    val timestamp = latestStreamTimestamp.value match {
+      case Some(value) => value
+      case None =>
+        latestStaticTimestamp.value match {
+          case Some(value) => value
+          case None => ""
+        }
+    }
+
+    stsMap.put("process_timestamp", timestamp)
+    stsMap.put("storage", storageMap)
+    stsMap.put("stream", streamMap)
+    stsMap
   }
 }

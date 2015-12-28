@@ -31,18 +31,41 @@ CreateModel(algorithm: String,
             modelName: String,
             labelOrId: Option[(String, String)],
             featureExtraction: List[(FeatureFunctionParameters, String)],
-            configJson: String) extends JubaQLAST {
-  override def toString: String = "CreateModel(%s,%s,%s,%s,%s)".format(
+            configJson: String,
+            resConfigJson: Option[String] = None,
+            logConfigJson: Option[String] = None,
+            serverConfigJson: Option[String] = None,
+            proxyConfigJson: Option[String] = None) extends JubaQLAST {
+  override def toString: String = "CreateModel(%s,%s,%s,%s,%s,%s,%s,%s,%s)".format(
     algorithm,
     modelName,
     labelOrId,
     featureExtraction,
-    if (configJson.size > 13) configJson.take(5) + "..." + configJson.takeRight(5)
-    else configJson
+    shorten(configJson),
+    resConfigJson match {
+      case Some(res) => shorten(res)
+      case None => resConfigJson
+    },
+    logConfigJson match {
+      case Some(res) => shorten(res)
+      case None => logConfigJson
+    },
+    serverConfigJson match {
+      case Some(server) => shorten(server)
+      case None => serverConfigJson
+    },
+    proxyConfigJson match {
+      case Some(proxy) => shorten(proxy)
+      case None => proxyConfigJson
+    }
   )
+
+  def shorten(s: String): String = if (s.size < 13) s else (s.take(5) + "..." + s.takeRight(5))
 }
 
 case class Update(modelName: String, rpcName: String, source: String) extends JubaQLAST
+
+case class UpdateWith(modelName: String, rpcName: String, learningData: String) extends JubaQLAST
 
 case class CreateStreamFromSelect(streamName: String, selectPlan: LogicalPlan) extends JubaQLAST
 
@@ -75,3 +98,7 @@ case class CreateFeatureFunction(funcName: String, args: List[(String, String)],
 
 case class CreateTriggerFunction(funcName: String, args: List[(String, String)],
                                  lang: String, body: String) extends JubaQLAST
+
+case class SaveModel(modelName: String, modelPath: String, modelId: String) extends JubaQLAST
+
+case class LoadModel(modelName: String, modelPath: String, modelId: String) extends JubaQLAST

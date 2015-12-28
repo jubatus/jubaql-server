@@ -39,9 +39,9 @@ trait ProcessorAndGatewayServer extends GatewayServer {
     )
 
   override def beforeAll(): Unit = {
-    plan.session2key += (session -> key_)
-    plan.key2session += (key_ -> session)
-    plan.session2loc += (session -> loc)
+    plan.sessionManager.session2key += (session -> key_)
+    plan.sessionManager.key2session += (key_ -> session)
+    plan.sessionManager.session2loc += (session -> loc)
     super.beforeAll()
 
     processorMock.start()

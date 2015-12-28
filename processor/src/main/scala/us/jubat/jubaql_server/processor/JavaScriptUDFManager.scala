@@ -20,8 +20,9 @@ import scala.collection.JavaConversions
 import javax.script.{ScriptEngine, ScriptEngineManager, Invocable}
 
 import scala.util.{Failure, Success, Try}
+import com.typesafe.scalalogging.slf4j.LazyLogging
 
-class JavaScriptUDFManager {
+class JavaScriptUDFManager extends LazyLogging {
   // The null is required.
   // See: http://stackoverflow.com/questions/20168226/sbt-0-13-scriptengine-is-null-for-getenginebyname-javascript
   private val scriptEngineManager = new ScriptEngineManager(null)
@@ -60,10 +61,17 @@ class JavaScriptUDFManager {
 
   private def invoke(funcName: String, args: AnyRef*): AnyRef = {
     val inv = getInvocableEngine()
-    inv.invokeFunction(funcName, args: _*)
+    try {
+      inv.invokeFunction(funcName, args: _*)
+    } catch {
+      case e: Exception =>
+        val errMsg = s"Failed to invoke function. functionName: ${funcName}, args: ${args.toString()}"
+        logger.error(errMsg, e)
+        throw new Exception(errMsg, e)
+    }
   }
 
-  def call[T](funcName: String, args: AnyRef*): Option[T] = {
+  def optionCall[T](funcName: String, args: AnyRef*): Option[T] = {
     Try {
       invoke(funcName, args:_*).asInstanceOf[T]
     } match {
@@ -76,14 +84,29 @@ class JavaScriptUDFManager {
     invoke(funcName, args:_*).asInstanceOf[T]
   }
 
-  def registerAndCall[T](funcName: String, nargs: Int, funcBody: String, args: AnyRef*): Option[T] = {
+  def call[T](funcName: String, args: AnyRef*): T = {
+    Try {
+      invoke(funcName, args:_*).asInstanceOf[T]
+    } match {
+      case Success(value) => value
+      case Failure(err) =>
+        throw err
+    }
+  }
+
+  def registerAndOptionCall[T](funcName: String, nargs: Int, funcBody: String, args: AnyRef*): Option[T] = {
     register(funcName, nargs, funcBody)
-    call[T](funcName, args:_*)
+    optionCall[T](funcName, args:_*)
   }
 
   def registerAndTryCall[T](funcName: String, nargs: Int, funcBody: String, args: AnyRef*): Try[T] = {
     register(funcName, nargs, funcBody)
     tryCall[T](funcName, args:_*)
+  }
+
+  def registerAndCall[T](funcName: String, nargs: Int, funcBody: String, args: AnyRef*): T = {
+    register(funcName, nargs, funcBody)
+    call[T](funcName, args:_*)
   }
 
   def getNumberOfArgsByFunctionName(fname: String): Option[Int] = funcs.synchronized {

@@ -3,4 +3,6 @@
 <properties>
 <!-- [kafka path] should be replaced with actual kafka path. -->
 <entry key="path">[kafka path]</entry>
+<!-- server_address should be change to actual kafka server address. -->
+<entry key="server_address">localhost:9092</entry>
 </properties>

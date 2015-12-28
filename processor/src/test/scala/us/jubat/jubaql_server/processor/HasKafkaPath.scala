@@ -37,4 +37,21 @@ trait HasKafkaPath extends ShouldMatchers {
 
     properties.getProperty("path")
   }
+
+  lazy val kafkaServerAddress: String = {
+    val kafkaXmlPath = "src/test/resources/kafka.xml"
+
+    val is = try {
+      Some(new FileInputStream(kafkaXmlPath))
+    } catch {
+      case _: FileNotFoundException =>
+        None
+    }
+    is shouldBe a[Some[_]]
+
+    val properties = new Properties()
+    properties.loadFromXML(is.get)
+
+    properties.getProperty("server_address")
+  }
 }

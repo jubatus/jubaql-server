@@ -15,14 +15,17 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 package us.jubat.jubaql_server.processor
 
-import java.io.{FileNotFoundException, FileInputStream}
 import java.util.Properties
-
 import org.apache.spark.sql.catalyst.errors.TreeNodeException
 import org.apache.spark.sql.catalyst.types._
 import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.{SparkContext, SparkException}
 import org.scalatest._
+import scala.collection.mutable.LinkedHashMap
+import kafka.producer.ProducerConfig
+import kafka.producer.Producer
+import kafka.producer.KeyedMessage
+
 
 class HybridProcessorSpec
   extends FlatSpec
@@ -98,6 +101,39 @@ class HybridProcessorSpec
     a[RuntimeException] should be thrownBy {
       processor.startJValueProcessing(rdd => rdd.count)
     }
+  }
+
+  "getStatus()" should "return datasource status for local files" taggedAs (LocalTest) in {
+    val inPath = "file://src/test/resources/dummydata"
+    val processor = new HybridProcessor(sc, sqlc, inPath, Nil)
+    var status = processor.getStatus()
+
+    // Initialized
+    status.get("state") shouldBe Some("Initialized")
+
+    status.get("storage") match {
+      case Some(storage) =>
+        val storageMap: LinkedHashMap[String, Any] = storage.asInstanceOf[LinkedHashMap[String, Any]]
+        storageMap.get("path") shouldBe Some(inPath)
+      case _ => fail()
+    }
+
+    status.get("stream") match {
+      case Some(stream) =>
+        val streamMap: LinkedHashMap[String, Any] = stream.asInstanceOf[LinkedHashMap[String, Any]]
+        streamMap.get("path") shouldBe Some(List())
+      case _ => fail()
+    }
+
+    // Running
+    processor.startJValueProcessing(rdd => rdd.count)
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Running")
+
+    // Finished
+    processor.awaitTermination()
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Finished")
   }
 
   override def afterAll = {
@@ -185,6 +221,39 @@ class HDFSStreamSpec
     streamInfo.itemCount shouldBe 0L
     streamInfo.runtime shouldBe 0L
     streamInfo.maxId shouldBe empty
+  }
+
+  "getStatus()" should "return datasource status for hdfs files" taggedAs (HDFSTest) in {
+    val inPath = "hdfs:///user/empty"
+    val processor = new HybridProcessor(sc, sqlc, inPath, Nil)
+    var status = processor.getStatus()
+
+    // Initialized
+    status.get("state") shouldBe Some("Initialized")
+
+    status.get("storage") match {
+      case Some(storage) =>
+        val storageMap: LinkedHashMap[String, Any] = storage.asInstanceOf[LinkedHashMap[String, Any]]
+        storageMap.get("path") shouldBe Some(inPath)
+      case _ => fail()
+    }
+
+    status.get("stream") match {
+      case Some(stream) =>
+        val streamMap: LinkedHashMap[String, Any] = stream.asInstanceOf[LinkedHashMap[String, Any]]
+        streamMap.get("path") shouldBe Some(List())
+      case _ => fail()
+    }
+
+    // Running
+    processor.startJValueProcessing(rdd => rdd.count)
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Running")
+
+    // Finished
+    processor.awaitTermination()
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Finished")
   }
 
   override def afterAll = {
@@ -306,6 +375,42 @@ class KafkaStreamSpec
     streamInfo.maxId shouldBe empty
   }
 
+  "getStatus()" should "return datasource status for stream" taggedAs (KafkaTest) in {
+    val inPath = s"kafka://$kafkaPath/dummy/1"
+    val processor = new HybridProcessor(sc, sqlc, "empty", inPath :: Nil)
+    var status = processor.getStatus()
+
+    // Initialized
+    status.get("state") shouldBe Some("Initialized")
+
+    status.get("storage") match {
+      case Some(storage) =>
+        val storageMap: LinkedHashMap[String, Any] = storage.asInstanceOf[LinkedHashMap[String, Any]]
+        storageMap.get("path") shouldBe Some("empty")
+      case _ => fail()
+    }
+
+    status.get("stoream") match {
+      case Some(stream) =>
+        val streamMap: LinkedHashMap[String, Any] = stream.asInstanceOf[LinkedHashMap[String, Any]]
+        streamMap.get("path") shouldBe Some(List(inPath))
+      case _ => fail()
+    }
+
+    // Running
+    val stopFun = processor.startJValueProcessing(rdd => rdd.count)._1
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Running")
+
+    Thread.sleep(1700) // if we stop during the first batch, something goes wrong
+    val (staticInfo, streamInfo) = stopFun()
+
+    // Finished
+    processor.awaitTermination()
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Finished")
+  }
+
   override def afterAll = {
     sc.stop()
   }
@@ -316,7 +421,7 @@ class HDFSKafkaStreamSpec
   with ShouldMatchers
   with HasKafkaPath
   with BeforeAndAfterAll {
-  val sc = new SparkContext("local[3]", "KafkaStreamSpec")
+  val sc = new SparkContext("local[3]", "HDFSKafkaStreamSpec")
   val sqlc = new SQLContext(sc)
 
   "HDFS+Kafka processing" should "change processing smoothly" taggedAs (HDFSTest, KafkaTest) in {
@@ -382,6 +487,157 @@ class HDFSKafkaStreamSpec
 
   override def afterAll = {
     sc.stop()
+  }
+}
+
+class FileKafkaStreamSpec
+  extends FlatSpec
+  with ShouldMatchers
+  with HasKafkaPath
+  with BeforeAndAfterAll {
+  val sc = new SparkContext("local[3]", "FileKafkaStreamSpec")
+  val sqlc = new SQLContext(sc)
+
+  // テスト実行時の事前準備
+  // ・kafka serverを起動する
+  // ・dummy1,dummy_1,dummy_2のtopicが存在しない場合作成する
+  "ProcessingStatus(phase/starTime/count/timeStamp)" should "check ProcessingStatus value" taggedAs (HDFSTest, KafkaTest) in {
+    val filePath = "file://src/test/resources/test_data.json"
+    val kafkaURI = s"kafka://$kafkaPath/dummy1/1"
+    val processor = new HybridProcessor(sc, sqlc, filePath, kafkaURI :: Nil)
+
+    val testStartTime = System.currentTimeMillis()
+
+    processor.getStatus.get("process_phase").get shouldBe "Stop"
+    var storageMap = processor.getStatus.get("storage").get.asInstanceOf[LinkedHashMap[String,Any]]
+    storageMap.get("storage_start").get shouldBe 0L
+    storageMap.get("storage_count").get shouldBe 0L
+    var streamMap = processor.getStatus.get("stream").get.asInstanceOf[LinkedHashMap[String,Any]]
+    streamMap.get("stream_start").get shouldBe 0L
+    streamMap.get("stream_count").get shouldBe 0L
+    processor.getStatus.get("process_timestamp").get shouldBe ""
+
+    val stopFun = processor.startJValueProcessing(rdd => rdd.count)._1
+
+    sendKafkaMessage(s"$kafkaServerAddress", "dummy1", Array("""{"label":"tokugawa", "name":"test1", "jubaql_timestamp": "2016-11-11T11:11:11"}""", """{"label":"tokugawa", "name":"test2", "jubaql_timestamp": "2014-11-11T11:11:15"}""","""{"label":"tokugawa", "name":"test3", "jubaql_timestamp": "2016-11-11T11:11:10"}"""))
+
+    processor.getStatus.get("process_phase").get shouldBe "Storage"
+
+    while (processor.phase == StoragePhase) {
+      Thread.sleep(1000)
+    }
+    processor.getStatus.get("process_phase").get shouldBe "Stream"
+    storageMap = processor.getStatus.get("storage").get.asInstanceOf[LinkedHashMap[String,Any]]
+    storageMap.get("storage_start").get.asInstanceOf[Long]  should be > testStartTime
+    storageMap.get("storage_count").get shouldBe 3L
+    streamMap = processor.getStatus.get("stream").get.asInstanceOf[LinkedHashMap[String,Any]]
+    streamMap.get("stream_start").get.asInstanceOf[Long] should be > storageMap.get("storage_start").get.asInstanceOf[Long]
+    streamMap.get("stream_count").get shouldBe 0L
+    processor.getStatus.get("process_timestamp").get shouldBe "2015-11-11T11:11:13"
+
+    Thread.sleep(5000)
+    val (staticInfo, streamInfo) = stopFun()
+
+    processor.getStatus.get("process_phase").get shouldBe "Stop"
+    storageMap = processor.getStatus.get("storage").get.asInstanceOf[LinkedHashMap[String,Any]]
+    storageMap.get("storage_start").get.asInstanceOf[Long]  should be > testStartTime
+    storageMap.get("storage_count").get shouldBe 3L
+    streamMap = processor.getStatus.get("stream").get.asInstanceOf[LinkedHashMap[String,Any]]
+    streamMap.get("stream_start").get.asInstanceOf[Long] should be > storageMap.get("storage_start").get.asInstanceOf[Long]
+    streamMap.get("stream_count").get shouldBe 2L
+    processor.getStatus.get("process_timestamp").get shouldBe "2016-11-11T11:11:11"
+  }
+
+  it should "Interference confirmation of ProcessingStatus values" taggedAs (HDFSTest, KafkaTest) in {
+    val filePathA = "file://src/test/resources/data_1.json"
+    val kafkaURIA = s"kafka://$kafkaPath/dummy_1/1"
+    val processorA = new HybridProcessor(sc, sqlc, filePathA, kafkaURIA :: Nil)
+    val filePathB = "file://src/test/resources/data_2.json"
+    val kafkaURIB = s"kafka://$kafkaPath/dummy_2/1"
+    val processorB = new HybridProcessor(sc, sqlc, filePathB, kafkaURIB :: Nil)
+
+    sendKafkaMessage(s"$kafkaServerAddress", "dummy_1", Array("""{"label":"tokugawa", "name":"test1", "jubaql_timestamp": "2015-11-11T11:11:11"}""", """{"label":"tokugawa", "name":"test2", "jubaql_timestamp": "2015-11-11T11:11:12"}"""))
+    Thread.sleep(3000)
+    sendKafkaMessage(s"$kafkaServerAddress", "dummy_2", Array("""{"label":"tokugawa", "name":"test1", "jubaql_timestamp": "2016-11-11T11:11:11"}""", """{"label":"tokugawa", "name":"test1", "jubaql_timestamp": "2016-11-11T11:11:13"}"""))
+
+    val stopFunA = processorA.startJValueProcessing(rdd => rdd.count)._1
+    while (processorA.phase == StoragePhase) {
+      Thread.sleep(1000)
+    }
+    Thread.sleep(10000)
+    processorA.getStatus.get("process_phase").get shouldBe "Stream"
+    var storageMapA = processorA.getStatus.get("storage").get.asInstanceOf[LinkedHashMap[String,Any]]
+    storageMapA.get("storage_start").get.asInstanceOf[Long] should be > 0L
+    storageMapA.get("storage_count").get shouldBe 4L
+    var streamMapA = processorA.getStatus.get("stream").get.asInstanceOf[LinkedHashMap[String,Any]]
+    streamMapA.get("stream_start").get.asInstanceOf[Long] should be > 0L
+    streamMapA.get("stream_count").get.asInstanceOf[Long] shouldBe 2L
+    processorA.getStatus.get("process_timestamp").get shouldBe "2015-11-11T11:11:12"
+
+    processorB.getStatus.get("process_phase").get shouldBe "Stop"
+    var storageMapB = processorB.getStatus.get("storage").get.asInstanceOf[LinkedHashMap[String,Any]]
+    storageMapB.get("storage_start").get.asInstanceOf[Long] shouldBe 0L
+    storageMapB.get("storage_count").get shouldBe 0L
+    var streamMapB = processorB.getStatus.get("stream").get.asInstanceOf[LinkedHashMap[String,Any]]
+    streamMapB.get("stream_start").get.asInstanceOf[Long] shouldBe 0L
+    streamMapB.get("stream_count").get.asInstanceOf[Long] shouldBe 0L
+    processorB.getStatus.get("process_timestamp").get shouldBe ""
+
+    val (staticInfoA, streamInfoA) = stopFunA()
+
+    val stopFunB = processorB.startJValueProcessing(rdd => rdd.count)._1
+    while (processorB.phase == StoragePhase) {
+      Thread.sleep(1000)
+    }
+    Thread.sleep(10000)
+    processorA.getStatus.get("process_phase").get shouldBe "Stop"
+    storageMapA = processorA.getStatus.get("storage").get.asInstanceOf[LinkedHashMap[String,Any]]
+    storageMapA.get("storage_start").get.asInstanceOf[Long] should be > 0L
+    storageMapA.get("storage_count").get shouldBe 4L
+    streamMapA = processorA.getStatus.get("stream").get.asInstanceOf[LinkedHashMap[String,Any]]
+    streamMapA.get("stream_start").get.asInstanceOf[Long] should be > 0L
+    streamMapA.get("stream_count").get.asInstanceOf[Long] shouldBe 2L
+    processorA.getStatus.get("process_timestamp").get shouldBe "2015-11-11T11:11:12"
+
+    processorB.getStatus.get("process_phase").get shouldBe "Stream"
+    storageMapB = processorB.getStatus.get("storage").get.asInstanceOf[LinkedHashMap[String,Any]]
+    storageMapB.get("storage_start").get.asInstanceOf[Long] should be > 0L
+    storageMapB.get("storage_count").get shouldBe 2L
+    streamMapB = processorB.getStatus.get("stream").get.asInstanceOf[LinkedHashMap[String,Any]]
+    streamMapB.get("stream_start").get.asInstanceOf[Long] should be > 0L
+    streamMapB.get("stream_count").get.asInstanceOf[Long] shouldBe 1L
+    processorB.getStatus.get("process_timestamp").get shouldBe "2016-11-11T11:11:13"
+
+    val (staticInfoB, streamInfoB) = stopFunB()
+
+    processorA.getStatus.get("process_phase").get shouldBe "Stop"
+    processorB.getStatus.get("process_phase").get shouldBe "Stop"
+
+    //
+    storageMapA = processorA.getStatus.get("storage").get.asInstanceOf[LinkedHashMap[String,Any]]
+    storageMapB = processorB.getStatus.get("storage").get.asInstanceOf[LinkedHashMap[String,Any]]
+    streamMapA = processorA.getStatus.get("stream").get.asInstanceOf[LinkedHashMap[String,Any]]
+    streamMapB = processorB.getStatus.get("stream").get.asInstanceOf[LinkedHashMap[String,Any]]
+
+    storageMapA.get("storage_start").get.asInstanceOf[Long] should not be storageMapB.get("storage_start").get.asInstanceOf[Long]
+    streamMapA.get("stream_start").get.asInstanceOf[Long] should not be streamMapB.get("stream_start").get.asInstanceOf[Long]
+  }
+
+  override def afterAll = {
+    sc.stop()
+  }
+
+  def sendKafkaMessage(address:String, topic: String, message: Array[String]):Unit = {
+    val prop = new Properties()
+    prop.put("metadata.broker.list", address)
+    prop.put("serializer.class","kafka.serializer.StringEncoder")
+    val producerConfig = new ProducerConfig(prop)
+    val producer = new Producer[String, String](producerConfig)
+    message.foreach({ line =>
+      val message = new KeyedMessage[String, String](topic, line)
+      producer.send(message)
+    })
+    producer.close()
   }
 }
 

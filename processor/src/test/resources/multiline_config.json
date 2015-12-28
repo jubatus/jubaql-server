@@ -1,0 +1,5 @@
+{
+	"method": "AROW",
+	"parameter":
+		{"regularization_weight" : 1.0}
+}

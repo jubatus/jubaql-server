@@ -439,7 +439,11 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     // this creates a JSON configuration string for Jubatus as
     // computed from a CREATE MODEL statement
     def jubatusJsonConfig(cm: CreateModel): Either[(Int, String), String] = {
-      complementInputJson(cm.configJson).right.map(j => pretty(render(j)))
+      val jsonString = cm.jubatusConfigJsonOrPath match {
+        case Left(jsonString) => jsonString
+        case Right(file) => readConfigFile(file)
+      }
+      complementInputJson(jsonString).right.map(j => pretty(render(j)))
     }
 
     // returns the logger used by the JubaQLService

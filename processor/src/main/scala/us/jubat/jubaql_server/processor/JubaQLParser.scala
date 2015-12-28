@@ -24,6 +24,8 @@ import com.typesafe.scalalogging.slf4j.LazyLogging
 
 import scala.util.parsing.input.CharArrayReader._
 
+import java.net.URI
+
 // TODO: move these to a proper file.
 // TODO: rename to better ones.
 sealed trait FeatureFunctionParameters
@@ -111,6 +113,12 @@ class JubaQLParser extends SqlParser with LazyLogging {
   protected lazy val TIME = Keyword("TIME")
   protected lazy val TUPLES = Keyword("TUPLES")
   protected lazy val OVER = Keyword("OVER")
+  protected lazy val SAVE = Keyword("SAVE")
+  protected lazy val LOAD = Keyword("LOAD")
+  protected lazy val RESOURCE = Keyword("RESOURCE")
+  protected lazy val SERVER = Keyword("SERVER")
+  protected lazy val PROXY = Keyword("PROXY")
+  protected lazy val FILE = Keyword("FILE")
 
   override val lexical = new JubaQLLexical(reservedWords)
 
@@ -221,10 +229,18 @@ class JubaQLParser extends SqlParser with LazyLogging {
         (params, functionName.getOrElse("id"))
     }
 
+    val jsonOrPath: Parser[Either[String, URI]] = opt(FILE) ~ stringLit ^^ {
+        case None ~ json =>
+          Left(json)
+        case Some(_) ~ path =>
+          Right(new URI(path))
+    }
+
     CREATE ~> jubatusAlgorithm ~ MODEL ~ modelIdent ~ opt(labelOrId) ~ AS ~
-      rep1sep(paramsAndFunction, ",") ~ CONFIG ~ stringLit ^^ {
-      case algorithm ~ _ ~ modelName ~ maybeLabelOrId ~ _ ~ l ~ _ ~ config =>
-        CreateModel(algorithm, modelName, maybeLabelOrId, l, config)
+      rep1sep(paramsAndFunction, ",") ~ CONFIG ~ jsonOrPath ~ opt(RESOURCE ~ CONFIG ~> jsonOrPath) ~ opt(LOG ~ CONFIG ~> jsonOrPath) ~
+      opt(SERVER ~ CONFIG ~> jsonOrPath) ~ opt(PROXY ~ CONFIG ~> jsonOrPath) ^^ {
+      case algorithm ~ _ ~ modelName ~ maybeLabelOrId ~ _ ~ l ~ _ ~ config ~ resourceConfig ~ logConfig ~ serverConfig ~ proxyConfig =>
+        CreateModel(algorithm, modelName, maybeLabelOrId, l, config, resourceConfig, logConfig, serverConfig, proxyConfig)
     }
   }
 
@@ -290,9 +306,11 @@ class JubaQLParser extends SqlParser with LazyLogging {
   }
 
   protected lazy val update: Parser[JubaQLAST] = {
-    UPDATE ~ MODEL ~> modelIdent ~ USING ~ funcIdent ~ FROM ~ streamIdent ^^ {
-      case modelName ~ _ ~ rpcName ~ _ ~ source =>
+    UPDATE ~ MODEL ~> modelIdent ~ USING ~ funcIdent ~ (FROM ~ streamIdent | WITH ~ stringLit) ^^ {
+      case modelName ~ _ ~ rpcName ~ (fromOrWith ~ source) if fromOrWith.compareToIgnoreCase("FROM") == 0 =>
         Update(modelName, rpcName, source)
+      case modelName ~ _ ~ rpcName ~ (fromOrWith ~ learningData) if fromOrWith.compareToIgnoreCase("WITH") == 0 =>
+        UpdateWith(modelName, rpcName, learningData)
     }
   }
 
@@ -369,6 +387,30 @@ class JubaQLParser extends SqlParser with LazyLogging {
     }
   }
 
+  protected lazy val saveModel: Parser[JubaQLAST] = {
+    SAVE ~ MODEL ~> modelIdent ~ USING ~ stringLit ~ AS ~ ident ^^ {
+      case modelName ~ _ ~ modelPath ~ _ ~ modelId =>
+        modelPath match {
+          case "" =>
+            null
+          case _ =>
+            SaveModel(modelName, modelPath, modelId)
+        }
+    }
+  }
+
+  protected lazy val loadModel: Parser[JubaQLAST] = {
+    LOAD ~ MODEL ~> modelIdent ~ USING ~ stringLit ~ AS ~ ident ^^ {
+      case modelName ~ _ ~ modelPath ~ _ ~ modelId =>
+        modelPath match {
+          case "" =>
+            null
+          case _ =>
+            LoadModel(modelName, modelPath, modelId)
+        }
+    }
+  }
+
   protected lazy val jubaQLQuery: Parser[JubaQLAST] = {
     createDatasource |
       createModel |
@@ -385,7 +427,9 @@ class JubaQLParser extends SqlParser with LazyLogging {
       stopProcessing |
       createFunction |
       createFeatureFunction |
-      createTriggerFunction
+      createTriggerFunction |
+      saveModel |
+      loadModel
   }
 
   // note: apply cannot override incompatible type with parent class

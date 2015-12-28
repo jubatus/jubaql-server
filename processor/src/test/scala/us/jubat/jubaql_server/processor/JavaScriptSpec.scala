@@ -25,6 +25,9 @@ import unfiltered.util.RunnableServer
 
 import scala.collection.JavaConversions._
 import scala.util.Success
+import org.scalatest.exceptions.TestFailedException
+import javax.script.ScriptException
+import scala.util.Failure
 
 class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
   protected var wiser: Wiser = null
@@ -105,10 +108,12 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
         |  return result.get();
       """.stripMargin
     val funcBody = funcBodyTmpl.format(body)
+    val cores = Runtime.getRuntime().availableProcessors();
     // up to 8 requests are processed in parallel, the 9th is
     // executed later (seems like 8 is the thread pool limit for
     // either dispatch or unfiltered)
-    val loop = (1 to 8).toList.par
+    // modify: get number of cores
+    val loop = (1 to cores).toList.par
     val startTime = System.currentTimeMillis()
     val resultOpts = loop.map(_ => {
       JavaScriptUDFManager.registerAndTryCall[String]("test", 0, funcBody)
@@ -205,6 +210,89 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
     mime.getAllRecipients.head.toString shouldBe "root@localhost"
     mime.getSubject shouldBe "こんにちは"
     mime.getContent.toString should include("よろしく")
+  }
+
+  it should "registerAndCall: allow simple functions" taggedAs (LocalTest) in {
+    val body = "return x;"
+    val funcBody = funcBodyTmpl.format(body)
+    val result = JavaScriptUDFManager.registerAndCall[Double]("test",
+      1, funcBody, Double.box(17.0))
+    result shouldBe 17.0
+  }
+
+  it should "registerAndTryCall: allow simple functions" taggedAs (LocalTest) in {
+    val body = "return x;"
+    val funcBody = funcBodyTmpl.format(body)
+    val resultTry = JavaScriptUDFManager.registerAndTryCall[Double]("test",
+      1, funcBody, Double.box(17.0))
+    resultTry shouldBe a[Success[_]]
+    resultTry.foreach(result => {
+      result shouldBe 17.0
+    })
+  }
+
+  it should "registerAndOptionCall: allow simple functions" taggedAs (LocalTest) in {
+    val body = "return x;"
+    val funcBody = funcBodyTmpl.format(body)
+    val resultOpt = JavaScriptUDFManager.registerAndOptionCall[Double]("test",
+      1, funcBody, Double.box(17.0))
+    resultOpt shouldBe a[Some[_]]
+    resultOpt.foreach(result => {
+      result shouldBe 17.0
+    })
+  }
+
+  "JavaScript throws Exception" should "registerAndCall(args = 1) throw Exception" taggedAs (LocalTest) in {
+    val body = "throw new Error('error Message');"
+    val funcBody = funcBodyTmpl.format(body)
+    try {
+      val result = JavaScriptUDFManager.registerAndCall[Double]("test",
+        1, funcBody, Double.box(17.0))
+      fail()
+    } catch {
+      case e: TestFailedException =>
+        e.printStackTrace()
+        fail()
+      case e: Exception =>
+        // invoke methodの出力メッセージ確認
+        e.getMessage should startWith("Failed to invoke function. functionName: test, args: WrappedArray(17.0)")
+    }
+  }
+
+  it should "registerAndCall(args = 0) throw Exception" taggedAs (LocalTest) in {
+    val body = "throw new Error('error Message');"
+    val funcBody = funcBodyTmpl.format(body)
+    try {
+      val result = JavaScriptUDFManager.registerAndCall[Double]("test",
+        0, funcBody)
+      fail()
+    } catch {
+      case e: TestFailedException =>
+        e.printStackTrace()
+        fail()
+      case e: Exception =>
+        // invoke methodの出力メッセージ確認(パラメータなし)
+        e.getMessage should startWith("Failed to invoke function. functionName: test, args: WrappedArray()")
+    }
+  }
+
+  it should "registerAndTryCall return Failure" taggedAs (LocalTest) in {
+    val body = "throw new Error('error Message');"
+    val funcBody = funcBodyTmpl.format(body)
+    val resultTry = JavaScriptUDFManager.registerAndTryCall[Double]("test",
+      1, funcBody, Double.box(17.0))
+    resultTry shouldBe a[Failure[_]]
+    resultTry.foreach(result => {
+      result shouldBe "Failed to invoke function. functionName: test, args: WrappedArray(17.0)"
+    })
+  }
+
+  it should "registerAndOptionCall return None" taggedAs (LocalTest) in {
+    val body = "throw new Error('error Message');"
+    val funcBody = funcBodyTmpl.format(body)
+    val resultTry = JavaScriptUDFManager.registerAndOptionCall[Double]("test",
+      1, funcBody, Double.box(17.0))
+    resultTry shouldBe None
   }
 
   // this server mocks the gateway

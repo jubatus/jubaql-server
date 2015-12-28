@@ -33,7 +33,7 @@ import org.apache.spark.streaming.kafka.KafkaUtils
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.SparkContext._
 import kafka.serializer.StringDecoder
-import scala.collection.mutable.Queue
+import scala.collection.mutable.{Queue, LinkedHashMap}
 import org.apache.spark.sql.{SchemaRDD, SQLContext}
 import org.apache.spark.sql.catalyst.types.StructType
 import org.json4s.JValue
@@ -606,5 +606,19 @@ class HybridProcessor(sc: SparkContext,
         logger.info(s"streaming context was stopped after exception")
         throw e
     }
+  }
+
+  def getStatus(): LinkedHashMap[String, Any] = {
+    var storageMap: LinkedHashMap[String, Any] = new LinkedHashMap()
+    storageMap.put("path", storageLocation)
+
+    var streamMap: LinkedHashMap[String, Any] = new LinkedHashMap()
+    streamMap.put("path", streamLocations)
+
+    var stsMap: LinkedHashMap[String, Any] = new LinkedHashMap()
+    stsMap.put("state", _state.toString())
+    stsMap.put("storage", storageMap)
+    stsMap.put("stream", streamMap)
+    stsMap
   }
 }

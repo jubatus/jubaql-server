@@ -13,22 +13,37 @@
 // You should have received a copy of the GNU Lesser General Public
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
-package us.jubat.jubaql_server.processor.json
+package us.jubat.jubaql_server.gateway
 
-import scala.collection.Map
+import java.io.{FileInputStream, FileNotFoundException}
+import java.util.Properties
 
-// We use a sealed trait to make sure we have all possible
-// response types in *this* file.
-sealed trait JubaQLResponse
+import org.scalatest._
 
-case class StatementProcessed(result: String)
-  extends JubaQLResponse
+trait HasSpark extends ShouldMatchers {
+  lazy val sparkPath: String = {
+    val properties = loadProperties()
+    properties.getProperty("spark_home_path")
+  }
 
-case class AnalyzeResultWrapper(result: AnalyzeResult)
-  extends JubaQLResponse
+  lazy val dummySparkPath: String = {
+    val properties = loadProperties()
+    properties.getProperty("dummy_spark_home_path")
+  }
 
-case class StatusResponse(result: String,
-  sources: Map[String, Any],
-  models: Map[String, Any],
-  processor: Map[String, Any])
-  extends JubaQLResponse
+  private def loadProperties(): Properties = {
+        val sparkConfig = "src/test/resources/spark.xml"
+
+    val is = try {
+      Some(new FileInputStream(sparkConfig))
+    } catch {
+      case _: FileNotFoundException =>
+        None
+    }
+    is shouldBe a[Some[_]]
+
+    val properties = new Properties()
+    properties.loadFromXML(is.get)
+    properties
+  }
+}

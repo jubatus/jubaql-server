@@ -26,7 +26,7 @@ import org.json4s.JsonDSL._
 import org.json4s.native.JsonMethods._
 import scala.util.{Success, Failure, Try}
 import us.jubat.jubaql_server.processor._
-import us.jubat.jubaql_server.processor.json.ClassifierResult
+import us.jubat.jubaql_server.processor.json.{ClassifierResult, AnomalyScore}
 
 /** Tests the correct behavior as viewed from the outside.
   */
@@ -103,6 +103,16 @@ trait ProcessorTestManager
     StringBuffer, String => Try[(Int, JValue)]) = {
     val command = Seq("./start-script/run")
     val pb = commandToProcessBuilder(command)
+    val (logger, stdoutBuffer, stderrBuffer) = getProcessLogger()
+    val process = pb run logger
+    val port = getServerPort(stdoutBuffer)
+    (process, stdoutBuffer, sendJubaQLTo(port))
+  }
+
+  protected def startProcessor(env: String): (Process,
+    StringBuffer, String => Try[(Int, JValue)]) = {
+    val command = Seq("./start-script/run")
+    val pb = commandToProcessBuilder(command, env)
     val (logger, stdoutBuffer, stderrBuffer) = getProcessLogger()
     val process = pb run logger
     val port = getServerPort(stdoutBuffer)
@@ -266,6 +276,55 @@ class CreateModelSpec
     // wait until shutdown
     val exitValue = process.exitValue()
     exitValue shouldBe 0
+  }
+
+  "CREATE MODEL(Production Mode)" should "return HTTP 200 on correct syntax and application-name of the as expected" taggedAs (JubatusTest) in {
+    // override before() processing
+    if (process != null) process.destroy()
+    // start production-mode processor
+    val startResult = startProcessor("-Drun.mode=production -Djubaql.zookeeper=127.0.0.1:2181 -Djubaql.checkpointdir=file:///tmp/spark -Djubaql.gateway.address=testAddress:1234 -Djubaql.processor.sessionId=1234567890abcdeABCDE")
+    process = startResult._1
+    stdout = startResult._2
+    sendJubaQL = startResult._3
+
+    val cmResult = sendJubaQL(goodCmStmt)
+    cmResult shouldBe a[Success[_]]
+    cmResult.get._1 shouldBe 200
+    cmResult.get._2 \ "result" shouldBe JString("CREATE MODEL (started)")
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+
+    // check application-name
+    stdout.toString should include("starting JubatusOnYarn:testAddress:1234:1234567890abcdeABCDE:classifier:test1")
+  }
+
+  "CREATE MODEL(Production Mode) without SystemProperty" should "return HTTP 200 on correct syntax and application-name of the as expected" taggedAs (JubatusTest) in {
+
+    // override before() processing
+    if (process != null) process.destroy()
+    // start production-mode processor (without System Property)
+    val startResult = startProcessor("-Drun.mode=production -Djubaql.zookeeper=127.0.0.1:2181 -Djubaql.checkpointdir=file:///tmp/spark")
+    process = startResult._1
+    stdout = startResult._2
+    sendJubaQL = startResult._3
+
+    val cmResult = sendJubaQL(goodCmStmt)
+    cmResult shouldBe a[Success[_]]
+    cmResult.get._1 shouldBe 200
+    cmResult.get._2 \ "result" shouldBe JString("CREATE MODEL (started)")
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+
+    // check application-name
+    stdout.toString should include("starting JubatusOnYarn:::classifier:test1")
   }
 }
 
@@ -1174,6 +1233,65 @@ class CreateStreamFromAnalyzeSpec
     exitValue shouldBe 0
   }
 
+  it should "work correctly with CLASSIFIER and use error function" taggedAs (LocalTest, JubatusTest) in {
+    implicit val formats = DefaultFormats
+
+    val cfResult = sendJubaQL(
+      """CREATE FUNCTION addABC(label string) RETURNS string LANGUAGE JavaScript AS $$
+        |if (label == '徳川') {
+        |  return label + "ABC";
+        |} else {
+        |  throw new Error("Error Message");
+        |}
+        |$$
+      """.stripMargin)
+    cfResult shouldBe a[Success[_]]
+    cfResult.get._1 shouldBe 200
+    cfResult.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cmStmt = """CREATE DATASOURCE ds (label string, name string) FROM (STORAGE: "file://src/test/resources/shogun_data.json")"""
+    val cmResult = sendJubaQL(cmStmt)
+    cmResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/shogun.json").getLines().mkString("")
+    val cdStmt = s"""CREATE CLASSIFIER MODEL test (label: label) AS name WITH unigram CONFIG '$config'"""
+    val cdResult = sendJubaQL(cdStmt)
+    cdResult shouldBe a[Success[_]]
+
+    val csfsStmt = """CREATE STREAM ds2 FROM SELECT addABC(label) AS lable, name FROM ds"""
+    val csfsResult = sendJubaQL(csfsStmt)
+    csfsResult shouldBe a[Success[_]]
+
+    val csfaStmt = """CREATE STREAM output FROM ANALYZE ds2 BY MODEL test USING classify AS newcol"""
+    val csfaResult = sendJubaQL(csfaStmt)
+    csfaResult shouldBe a[Success[_]]
+
+    // executed before UPDATE
+    sendJubaQL("LOG STREAM output") shouldBe a[Success[_]]
+
+    val umStmt = """UPDATE MODEL test USING train FROM ds"""
+    val umResult = sendJubaQL(umStmt)
+    umResult shouldBe a[Success[_]]
+
+    // executed after UPDATE
+    sendJubaQL("LOG STREAM output") shouldBe a[Success[_]]
+
+    val spResult = sendJubaQL("START PROCESSING ds")
+    spResult shouldBe a[Success[_]]
+    waitUntilDone("ds", 30000)
+    // before the first update:
+    stdout.toString should include("徳川ABC | 家康 | List()")
+    // after the first update:
+    stdout.toString should include regex("徳川ABC \\| 家康 \\| .*徳川,0.93333333")
+
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+  }
+
   it should "work correctly with ANOMALY" taggedAs (LocalTest, JubatusTest) in {
     val cmStmt = """CREATE DATASOURCE ds (label string, name string) FROM (STORAGE: "file://src/test/resources/shogun_data.json")"""
     val cmResult = sendJubaQL(cmStmt)
@@ -1214,15 +1332,72 @@ class CreateStreamFromAnalyzeSpec
     exitValue shouldBe 0
   }
 
-  it should "work correctly with RECOMMENDER/from_id" taggedAs (LocalTest, JubatusTest) in {
-    val cmStmt = """CREATE DATASOURCE ds FROM (STORAGE: "file://src/test/resources/npb_similar_player_data.json")"""
+  it should "work correctly with ANOMALY and use error function" taggedAs (LocalTest, JubatusTest) in {
+    val cfResult = sendJubaQL(
+      """CREATE FUNCTION addABC(label string) RETURNS string LANGUAGE JavaScript AS $$
+        |if (label == '徳川') {
+        |  return label + "ABC";
+        |} else {
+        |  throw new Error("Error Message");
+        |}
+        |$$
+      """.stripMargin)
+    cfResult shouldBe a[Success[_]]
+    cfResult.get._1 shouldBe 200
+    cfResult.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cdStmt = """CREATE DATASOURCE ds (label string, name string) FROM (STORAGE: "file://src/test/resources/shogun_data.json")"""
+    val cdResult = sendJubaQL(cdStmt)
+    cdResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/lof.json").getLines().mkString("")
+    val cmStmt = s"""CREATE ANOMALY MODEL test AS name WITH unigram CONFIG '$config'"""
     val cmResult = sendJubaQL(cmStmt)
     cmResult shouldBe a[Success[_]]
 
-    val config = Source.fromFile("src/test/resources/npb_similar_player.json").getLines().mkString("")
-    val cdStmt = s"""CREATE RECOMMENDER MODEL test (id: id) AS team WITH unigram, * WITH id CONFIG '$config'"""
+    val csfsStmt = """CREATE STREAM ds2 FROM SELECT addABC(label) AS lable, name FROM ds"""
+    val csfsResult = sendJubaQL(csfsStmt)
+    csfsResult shouldBe a[Success[_]]
+
+    val csfaStmt = """CREATE STREAM output FROM ANALYZE ds2 BY MODEL test USING calc_score AS newcol"""
+    val csfaResult = sendJubaQL(csfaStmt)
+    csfaResult shouldBe a[Success[_]]
+
+    // executed before UPDATE
+    sendJubaQL("LOG STREAM output") shouldBe a[Success[_]]
+
+    val umStmt = """UPDATE MODEL test USING add FROM ds"""
+    val umResult = sendJubaQL(umStmt)
+    umResult shouldBe a[Success[_]]
+
+    // executed after UPDATE
+    sendJubaQL("LOG STREAM output") shouldBe a[Success[_]]
+
+    val spResult = sendJubaQL("START PROCESSING ds")
+    spResult shouldBe a[Success[_]]
+    waitUntilDone("ds", 30000)
+    // before the first update:
+    stdout.toString should include("徳川ABC | 家康 | 1.0")
+    // after the first update:
+    stdout.toString should include("徳川ABC | 家康 | 0.9990")
+
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+  }
+
+  it should "work correctly with RECOMMENDER/from_id" taggedAs (LocalTest, JubatusTest) in {
+    val cdStmt = """CREATE DATASOURCE ds FROM (STORAGE: "file://src/test/resources/npb_similar_player_data.json")"""
     val cdResult = sendJubaQL(cdStmt)
     cdResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/npb_similar_player.json").getLines().mkString("")
+    val cmStmt = s"""CREATE RECOMMENDER MODEL test (id: id) AS team WITH unigram, * WITH id CONFIG '$config'"""
+    val cmResult = sendJubaQL(cmStmt)
+    cmResult shouldBe a[Success[_]]
 
     val csfaStmt = """CREATE STREAM output FROM ANALYZE ds BY MODEL test USING complete_row_from_id AS newcol"""
     val csfaResult = sendJubaQL(csfaStmt)
@@ -1240,11 +1415,68 @@ class CreateStreamFromAnalyzeSpec
 
     val spResult = sendJubaQL("START PROCESSING ds")
     spResult shouldBe a[Success[_]]
-    waitUntilDone("ds", 6000)
+    waitUntilDone("ds", 30000)
     // before the first update:
     stdout.toString should include regex("長野久義 .+Map\\(\\),Map\\(\\)")
     // after the first update:
     stdout.toString should include regex("長野久義 .+Map\\(\\),Map\\(.*OPS -> 0.6804.*\\)")
+
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+  }
+
+  it should "work correctly with RECOMMENDER/from_id and use error function" taggedAs (LocalTest, JubatusTest) in {
+    val cfResult = sendJubaQL(
+      """CREATE FUNCTION addABC(team string) RETURNS string LANGUAGE JavaScript AS $$
+        |if (team == '巨人') {
+        |  return team + "ABC";
+        |} else {
+        |  throw new Error("Error Message");
+        |}
+        |$$
+      """.stripMargin)
+    cfResult shouldBe a[Success[_]]
+    cfResult.get._1 shouldBe 200
+    cfResult.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cdStmt = """CREATE DATASOURCE ds (id string, team string, 打率 numeric, 試合数 numeric, 打席 numeric, 打数 numeric, 安打 numeric, 本塁打 numeric, 打点 numeric, 盗塁 numeric, 四球 numeric, 死球 numeric, 三振 numeric, 犠打 numeric, 併殺打 numeric, 長打率 numeric, 出塁率 numeric, OPS numeric, RC27 numeric, XR27 numeric) FROM (STORAGE: "file://src/test/resources/npb_similar_player_data.json")"""
+    val cdResult = sendJubaQL(cdStmt)
+    cdResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/npb_similar_player.json").getLines().mkString("")
+    val cmStmt = s"""CREATE RECOMMENDER MODEL test (id: id) AS team WITH unigram, * WITH id CONFIG '$config'"""
+    val cmResult = sendJubaQL(cmStmt)
+    cmResult shouldBe a[Success[_]]
+
+    val csfsStmt = """CREATE STREAM ds2 FROM SELECT id, addABC(team) AS team, 打率, 試合数, 打席, 打数, 安打, 本塁打, 打点, 盗塁, 四球, 死球, 三振, 犠打, 併殺打, 長打率, 出塁率, OPS, RC27, XR27 FROM ds"""
+    val csfsResult = sendJubaQL(csfsStmt)
+    csfsResult shouldBe a[Success[_]]
+
+    val csfaStmt = """CREATE STREAM output FROM ANALYZE ds2 BY MODEL test USING complete_row_from_id AS newcol"""
+    val csfaResult = sendJubaQL(csfaStmt)
+    csfaResult shouldBe a[Success[_]]
+
+    // executed before UPDATE
+    sendJubaQL("LOG STREAM output") shouldBe a[Success[_]]
+
+    val umStmt = """UPDATE MODEL test USING update_row FROM ds"""
+    val umResult = sendJubaQL(umStmt)
+    umResult shouldBe a[Success[_]]
+
+    // executed after UPDATE
+    sendJubaQL("LOG STREAM output") shouldBe a[Success[_]]
+
+    val spResult = sendJubaQL("START PROCESSING ds")
+    spResult shouldBe a[Success[_]]
+    waitUntilDone("ds", 30000)
+    // before the first update:
+    stdout.toString should include regex("長野久義 \\| 巨人ABC .+Map\\(\\),Map\\(\\)")
+    // after the first update:
+    stdout.toString should include regex("長野久義 \\| 巨人ABC .+Map\\(\\),Map\\(.*OPS -> 0.6804.*\\)")
 
     // shut down
     val sdResult = sendJubaQL("SHUTDOWN")
@@ -1280,11 +1512,68 @@ class CreateStreamFromAnalyzeSpec
 
     val spResult = sendJubaQL("START PROCESSING ds")
     spResult shouldBe a[Success[_]]
-    waitUntilDone("ds", 6000)
+    waitUntilDone("ds", 30000)
     // before the first update:
     stdout.toString should include regex("長野久義 .+Map\\(\\),Map\\(\\)")
     // after the first update:
     stdout.toString should include regex("長野久義 .+Map\\(\\),Map\\(.*OPS -> 0.6804.*\\)")
+
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+  }
+
+  it should "work correctly with RECOMMENDER/from_data and use error function" taggedAs (LocalTest, JubatusTest) in {
+    val cfResult = sendJubaQL(
+      """CREATE FUNCTION addABC(name string, team string) RETURNS string LANGUAGE JavaScript AS $$
+        |if (team == '巨人') {
+        |  return name + "ABC";
+        |} else {
+        |  throw new Error("Error Message");
+        |}
+        |$$
+      """.stripMargin)
+    cfResult shouldBe a[Success[_]]
+    cfResult.get._1 shouldBe 200
+    cfResult.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cmStmt = """CREATE DATASOURCE ds (id string, team string, 打率 numeric, 試合数 numeric, 打席 numeric, 打数 numeric, 安打 numeric, 本塁打 numeric, 打点 numeric, 盗塁 numeric, 四球 numeric, 死球 numeric, 三振 numeric, 犠打 numeric, 併殺打 numeric, 長打率 numeric, 出塁率 numeric, OPS numeric, RC27 numeric, XR27 numeric) FROM (STORAGE: "file://src/test/resources/npb_similar_player_data.json")"""
+    val cmResult = sendJubaQL(cmStmt)
+    cmResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/npb_similar_player.json").getLines().mkString("")
+    val cdStmt = s"""CREATE RECOMMENDER MODEL test (id: id) AS team WITH unigram, * WITH id CONFIG '$config'"""
+    val cdResult = sendJubaQL(cdStmt)
+    cdResult shouldBe a[Success[_]]
+
+    val aStmt1 = """CREATE STREAM ds2 FROM SELECT addABC(id, team) AS id, team, 打率, 試合数, 打席, 打数, 安打, 本塁打, 打点, 盗塁, 四球, 死球, 三振, 犠打, 併殺打, 長打率, 出塁率, OPS, RC27, XR27 FROM ds"""
+    val aResult1 = sendJubaQL(aStmt1)
+    aResult1 shouldBe a[Success[_]]
+
+    val aStmt2 = """CREATE STREAM output FROM ANALYZE ds2 BY MODEL test USING complete_row_from_datum AS newcol"""
+    val aResult2 = sendJubaQL(aStmt2)
+    aResult2 shouldBe a[Success[_]]
+
+    // executed before UPDATE
+    sendJubaQL("LOG STREAM output") shouldBe a[Success[_]]
+
+    val umStmt = """UPDATE MODEL test USING update_row FROM ds"""
+    val umResult = sendJubaQL(umStmt)
+    umResult shouldBe a[Success[_]]
+
+    // executed after UPDATE
+    sendJubaQL("LOG STREAM output") shouldBe a[Success[_]]
+
+    val spResult = sendJubaQL("START PROCESSING ds")
+    spResult shouldBe a[Success[_]]
+    waitUntilDone("ds", 30000)
+    // before the first update:
+    stdout.toString should include regex("長野久義ABC .+Map\\(\\),Map\\(\\)")
+    // after the first update:
+    stdout.toString should include regex("長野久義ABC .+Map\\(\\),Map\\(.*OPS -> .*\\)")
 
     // shut down
     val sdResult = sendJubaQL("SHUTDOWN")
@@ -1493,10 +1782,11 @@ class UpdateModelSpec
     waitUntilDone("ds", 6000)
 
     stdout.toString should include("column named 'doesnotexist' not found")
-    stdout.toString should
-      include("HybridProcessor - Error while waiting for static processing end") // we log once
-    stdout.toString should
-      include("HybridProcessor - Error while setting up stream processing") // ... and again
+// エラー終了しないように改修したため、以下の判定は削除
+//    stdout.toString should
+//      include("HybridProcessor - Error while waiting for static processing end") // we log once
+//    stdout.toString should
+//      include("HybridProcessor - Error while setting up stream processing") // ... and again
 
     // shut down
     val sdResult = sendJubaQL("SHUTDOWN")
@@ -2974,6 +3264,517 @@ class CreateFunctionSpec
         scores("北条北条北条ABC") shouldBe 0.0
       case None =>
         fail("Failed to parse returned content as a classifier result")
+    }
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+  }
+
+  it should "make callable a throw error function which takes a string argument" taggedAs (LocalTest, JubatusTest) in {
+    implicit val formats = DefaultFormats
+
+    val cfResult = sendJubaQL(
+      """CREATE FUNCTION addABC(arg string) RETURNS string LANGUAGE JavaScript AS $$
+        |if (arg == '徳川') {
+        |  return arg + "ABC";
+        |} else {
+        |  throw new Error('error Message');
+        |}
+        |$$
+      """.stripMargin)
+    cfResult shouldBe a[Success[_]]
+    cfResult.get._1 shouldBe 200
+    cfResult.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cmStmt = """CREATE DATASOURCE ds1 (label string, name string) FROM (STORAGE: "file://src/test/resources/shogun_data.json")"""
+    val cmResult = sendJubaQL(cmStmt)
+    cmResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/shogun.json").getLines().mkString("")
+    val cdStmt = s"""CREATE CLASSIFIER MODEL test (label: label) AS name WITH unigram CONFIG '$config'"""
+    val cdResult = sendJubaQL(cdStmt)
+    cdResult shouldBe a[Success[_]]
+
+    val csResult = sendJubaQL("""CREATE STREAM ds2 FROM SELECT addABC(label) AS label, name FROM ds1""")
+    csResult shouldBe a[Success[_]]
+    csResult.get._1 shouldBe 200
+    csResult.get._2 \ "result" shouldBe JString("CREATE STREAM")
+
+    val umStmt = """UPDATE MODEL test USING train FROM ds2"""
+    val umResult = sendJubaQL(umStmt)
+    umResult shouldBe a[Success[_]]
+
+    val spResult = sendJubaQL("START PROCESSING ds1")
+    spResult shouldBe a[Success[_]]
+    waitUntilDone("ds1", 6000)
+
+    // analyze
+    val aStmt = """ANALYZE '{"name": "慶喜"}' BY MODEL test USING classify"""
+    val aResult = sendJubaQL(aStmt)
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // now check the result
+    aResult shouldBe a[Success[_]]
+    if (aResult.get._1 != 200)
+      println(stdout.toString)
+    aResult.get._1 shouldBe 200
+    (aResult.get._2 \ "result").extractOpt[ClassifierResult] match {
+      case Some(pred) =>
+        val scores = pred.predictions.map(res => (res.label, res.score)).toMap
+        // the order of entries differs per machine/OS, so we use this
+        // slightly complicated way of checking equality
+        scores.keys.size shouldBe 1
+        scores.keys.toList should contain only("徳川ABC")
+        Math.abs(scores("徳川ABC") - 0.07692306488752365) should be < 0.00001
+      case None =>
+        fail("Failed to parse returned content as a classifier result")
+    }
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+  }
+
+  it should "make callable a throw error function which takes two string argument returns numeric" taggedAs (LocalTest, JubatusTest) in {
+    implicit val formats = DefaultFormats
+
+    val cfResult = sendJubaQL(
+      """CREATE FUNCTION addABC(arg string, arg2 numeric) RETURNS string LANGUAGE JavaScript AS $$
+        |if (arg == '徳川') {
+        |  return arg + "ABC : " + arg2;
+        |} else {
+        |  throw new Error('error Message');
+        |}
+        |$$
+      """.stripMargin)
+    cfResult shouldBe a[Success[_]]
+    cfResult.get._1 shouldBe 200
+    cfResult.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cfResultNum = sendJubaQL(
+      """CREATE FUNCTION getLength(arg string) RETURNS numeric LANGUAGE JavaScript AS $$
+        |if (arg == '徳川') {
+        |  return parseFloat(arg.length);
+        |} else {
+        |  throw new Error('error Message');
+        |}
+        |$$
+      """.stripMargin)
+    cfResultNum shouldBe a[Success[_]]
+    cfResultNum.get._1 shouldBe 200
+    cfResultNum.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cmStmt = """CREATE DATASOURCE ds1 (label string, name string) FROM (STORAGE: "file://src/test/resources/shogun_data.json")"""
+    val cmResult = sendJubaQL(cmStmt)
+    cmResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/shogun.json").getLines().mkString("")
+    val cdStmt = s"""CREATE CLASSIFIER MODEL test (label: label) AS name WITH unigram CONFIG '$config'"""
+    val cdResult = sendJubaQL(cdStmt)
+    cdResult shouldBe a[Success[_]]
+
+    val csResult = sendJubaQL("""CREATE STREAM ds2 FROM SELECT label, getLength(label) AS labelLength, name FROM ds1""")
+    csResult shouldBe a[Success[_]]
+    csResult.get._1 shouldBe 200
+    csResult.get._2 \ "result" shouldBe JString("CREATE STREAM")
+
+    val csResult2 = sendJubaQL("""CREATE STREAM ds3 FROM SELECT addABC(label, labelLength) AS label, name FROM ds2""")
+    csResult2 shouldBe a[Success[_]]
+    csResult2.get._1 shouldBe 200
+    csResult2.get._2 \ "result" shouldBe JString("CREATE STREAM")
+
+    val umStmt = """UPDATE MODEL test USING train FROM ds3"""
+    val umResult = sendJubaQL(umStmt)
+    umResult shouldBe a[Success[_]]
+
+    val spResult = sendJubaQL("START PROCESSING ds1")
+    spResult shouldBe a[Success[_]]
+    waitUntilDone("ds1", 6000)
+
+    // analyze
+    val aStmt = """ANALYZE '{"name": "慶喜"}' BY MODEL test USING classify"""
+    val aResult = sendJubaQL(aStmt)
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // now check the result
+    aResult shouldBe a[Success[_]]
+    if (aResult.get._1 != 200)
+      println(stdout.toString)
+    aResult.get._1 shouldBe 200
+    (aResult.get._2 \ "result").extractOpt[ClassifierResult] match {
+      case Some(pred) =>
+        val scores = pred.predictions.map(res => (res.label, res.score)).toMap
+        // the order of entries differs per machine/OS, so we use this
+        // slightly complicated way of checking equality
+        scores.keys.size shouldBe 1
+        scores.keys.toList should contain only("徳川ABC : 2")
+        Math.abs(scores("徳川ABC : 2") - 0.07692306488752365) should be < 0.00001
+      case None =>
+        fail("Failed to parse returned content as a classifier result")
+    }
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+  }
+
+  it should "make callable a throw error function which takes two string argument returns boolean" taggedAs (LocalTest, JubatusTest) in {
+    implicit val formats = DefaultFormats
+
+    val cfResult = sendJubaQL(
+      """CREATE FUNCTION addABC(arg string, arg2 boolean) RETURNS string LANGUAGE JavaScript AS $$
+        |if (arg == '徳川') {
+        |  return arg + "ABC : " + arg2;
+        |} else {
+        |  throw new Error('error Message');
+        |}
+        |$$
+      """.stripMargin)
+    cfResult shouldBe a[Success[_]]
+    cfResult.get._1 shouldBe 200
+    cfResult.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cfResultNum = sendJubaQL(
+      """CREATE FUNCTION isTokugawa(arg string) RETURNS boolean LANGUAGE JavaScript AS $$
+        |if (arg == '徳川') {
+        |  return true;
+        |} else {
+        |  throw new Error('error Message');
+        |}
+        |$$
+      """.stripMargin)
+    cfResultNum shouldBe a[Success[_]]
+    cfResultNum.get._1 shouldBe 200
+    cfResultNum.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cmStmt = """CREATE DATASOURCE ds1 (label string, name string) FROM (STORAGE: "file://src/test/resources/shogun_data.json")"""
+    val cmResult = sendJubaQL(cmStmt)
+    cmResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/shogun.json").getLines().mkString("")
+    val cdStmt = s"""CREATE CLASSIFIER MODEL test (label: label) AS name WITH unigram CONFIG '$config'"""
+    val cdResult = sendJubaQL(cdStmt)
+    cdResult shouldBe a[Success[_]]
+
+    val csResult = sendJubaQL("""CREATE STREAM ds2 FROM SELECT label, isTokugawa(label) AS tokugawa, name FROM ds1""")
+    csResult shouldBe a[Success[_]]
+    csResult.get._1 shouldBe 200
+    csResult.get._2 \ "result" shouldBe JString("CREATE STREAM")
+
+    val csResult2 = sendJubaQL("""CREATE STREAM ds3 FROM SELECT addABC(label, tokugawa) AS label, name FROM ds2""")
+    csResult2 shouldBe a[Success[_]]
+    csResult2.get._1 shouldBe 200
+    csResult2.get._2 \ "result" shouldBe JString("CREATE STREAM")
+
+    val umStmt = """UPDATE MODEL test USING train FROM ds3"""
+    val umResult = sendJubaQL(umStmt)
+    umResult shouldBe a[Success[_]]
+
+    val spResult = sendJubaQL("START PROCESSING ds1")
+    spResult shouldBe a[Success[_]]
+    waitUntilDone("ds1", 6000)
+
+    // analyze
+    val aStmt = """ANALYZE '{"name": "慶喜"}' BY MODEL test USING classify"""
+    val aResult = sendJubaQL(aStmt)
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // now check the result
+    aResult shouldBe a[Success[_]]
+    if (aResult.get._1 != 200)
+      println(stdout.toString)
+    aResult.get._1 shouldBe 200
+    (aResult.get._2 \ "result").extractOpt[ClassifierResult] match {
+      case Some(pred) =>
+        val scores = pred.predictions.map(res => (res.label, res.score)).toMap
+        // the order of entries differs per machine/OS, so we use this
+        // slightly complicated way of checking equality
+        scores.keys.size shouldBe 1
+        scores.keys.toList should contain only("徳川ABC : true")
+        Math.abs(scores("徳川ABC : true") - 0.07692306488752365) should be < 0.00001
+      case None =>
+        fail("Failed to parse returned content as a classifier result")
+    }
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+  }
+
+  it should "work correctly with ANOMALY use function" taggedAs (LocalTest, JubatusTest) in {
+    val cfResult = sendJubaQL(
+      """CREATE FUNCTION addABC(arg string) RETURNS string LANGUAGE JavaScript AS $$
+        |return arg + "ABC";
+        |$$
+      """.stripMargin)
+    cfResult shouldBe a[Success[_]]
+    cfResult.get._1 shouldBe 200
+    cfResult.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cmStmt = """CREATE DATASOURCE ds1 (label string, name string) FROM (STORAGE: "file://src/test/resources/shogun_1.json")"""
+    val cmResult = sendJubaQL(cmStmt)
+    cmResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/lof.json").getLines().mkString("")
+    val cdStmt = s"""CREATE ANOMALY MODEL test AS name WITH unigram CONFIG '$config'"""
+    val cdResult = sendJubaQL(cdStmt)
+    cdResult shouldBe a[Success[_]]
+
+    val csResult = sendJubaQL("""CREATE STREAM ds2 FROM SELECT label, addABC(name) AS name FROM ds1""")
+    csResult shouldBe a[Success[_]]
+    csResult.get._1 shouldBe 200
+    csResult.get._2 \ "result" shouldBe JString("CREATE STREAM")
+
+    val umStmt = """UPDATE MODEL test USING add FROM ds2"""
+    val umResult = sendJubaQL(umStmt)
+    umResult shouldBe a[Success[_]]
+
+    val spResult = sendJubaQL("START PROCESSING ds1")
+    spResult shouldBe a[Success[_]]
+    waitUntilDone("ds1", 6000)
+
+    val aStmt =  """ANALYZE '{"label": "徳川","name": "家康ABC"}' BY MODEL test USING calc_score"""
+    val aResult = sendJubaQL(aStmt)
+    val aStmt2 = """ANALYZE '{"label": "徳川","name": "ABC"}' BY MODEL test USING calc_score"""
+    val aResult2 = sendJubaQL(aStmt2)
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // now check the result
+    aResult shouldBe a[Success[_]]
+    if (aResult.get._1 != 200)
+      println(stdout.toString)
+    aResult.get._1 shouldBe 200
+    (aResult.get._2 \ "result").extractOpt[AnomalyScore] match {
+      case Some(scoreRes) =>
+        val scores = scoreRes.score
+        // the order of entries differs per machine/OS, so we use this
+        // slightly complicated way of checking equality
+        scores shouldBe 1.0F
+      case None =>
+        fail("Failed to parse returned content as a calc_score result")
+    }
+    // now check the result
+
+    // TODO 結果がInfinityのため、レスポンスはパースエラーとなる
+    aResult2 shouldBe a[Failure[_]]
+
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+  }
+
+  it should "work correctly with ANOMALY use error function" taggedAs (LocalTest, JubatusTest) in {
+    val cfResult = sendJubaQL(
+      """CREATE FUNCTION addABC(arg string) RETURNS string LANGUAGE JavaScript AS $$
+        |if (arg == '徳川') {
+        |  return arg + "ABC";
+        |} else {
+        |  throw new Error('error Message');
+        |}$$
+      """.stripMargin)
+    cfResult shouldBe a[Success[_]]
+    cfResult.get._1 shouldBe 200
+    cfResult.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cmStmt = """CREATE DATASOURCE ds1 (label string, name string) FROM (STORAGE: "file://src/test/resources/shogun_2.json")"""
+    val cmResult = sendJubaQL(cmStmt)
+    cmResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/lof.json").getLines().mkString("")
+    val cdStmt = s"""CREATE ANOMALY MODEL test AS name WITH unigram CONFIG '$config'"""
+    val cdResult = sendJubaQL(cdStmt)
+    cdResult shouldBe a[Success[_]]
+
+    val csResult = sendJubaQL("""CREATE STREAM ds2 FROM SELECT addABC(label) AS label, name FROM ds1""")
+    csResult shouldBe a[Success[_]]
+    csResult.get._1 shouldBe 200
+    csResult.get._2 \ "result" shouldBe JString("CREATE STREAM")
+
+    val umStmt = """UPDATE MODEL test USING add FROM ds2"""
+    val umResult = sendJubaQL(umStmt)
+    umResult shouldBe a[Success[_]]
+
+    val spResult = sendJubaQL("START PROCESSING ds1")
+    spResult shouldBe a[Success[_]]
+    waitUntilDone("ds1", 6000)
+
+    val aStmt =  """ANALYZE '{"label": "徳川ABC","name": "家康"}' BY MODEL test USING calc_score"""
+    val aResult = sendJubaQL(aStmt)
+
+    val aStmt2 = """ANALYZE '{"label": "足利","name": "義満"}' BY MODEL test USING calc_score"""
+    val aResult2 = sendJubaQL(aStmt2)
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+    // now check the result
+    aResult shouldBe a[Success[_]]
+    if (aResult.get._1 != 200)
+      println(stdout.toString)
+    aResult.get._1 shouldBe 200
+    (aResult.get._2 \ "result").extractOpt[AnomalyScore] match {
+      case Some(scoreRes) =>
+        val scores = scoreRes.score
+        // the order of entries differs per machine/OS, so we use this
+        // slightly complicated way of checking equality
+        scores shouldBe 1.0F
+      case None =>
+        fail("Failed to parse returned content as a calc_score result")
+    }
+    // now check the result
+
+    // TODO 結果がInfinityのため、レスポンスはパースエラーとなる
+    aResult2 shouldBe a[Failure[_]]
+
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+  }
+
+  it should "recommender use function" taggedAs (LocalTest, JubatusTest) in {
+    val cfResult = sendJubaQL(
+      """CREATE FUNCTION addABC(arg string) RETURNS string LANGUAGE JavaScript AS $$
+        |return arg + "ABC";
+        |$$
+      """.stripMargin)
+    cfResult shouldBe a[Success[_]]
+    cfResult.get._1 shouldBe 200
+    cfResult.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cmStmt = """CREATE DATASOURCE ds1 (id string, team string, 打率 numeric, 試合数 numeric, 打席 numeric, 打数 numeric, 安打 numeric, 本塁打 numeric, 打点 numeric, 盗塁 numeric, 四球 numeric, 死球 numeric, 三振 numeric, 犠 打 numeric, 併殺打 numeric, 長打率 numeric, 出塁率 numeric, OPS numeric, RC27 numeric, XR27 numeric) FROM (STORAGE: "file://src/test/resources/npb_similar_player_data.json")"""
+    val cmResult = sendJubaQL(cmStmt)
+    cmResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/npb_similar_player.json").getLines().mkString("")
+    val cdStmt = s"""CREATE RECOMMENDER MODEL test (id: id) AS team WITH unigram, * WITH id CONFIG '$config'"""
+    val cdResult = sendJubaQL(cdStmt)
+    cdResult shouldBe a[Success[_]]
+
+    val csResult = sendJubaQL("""CREATE STREAM ds2 FROM SELECT addABC(id) AS id, team, 打率, 試合数, 打席, 打数, 安打, 本塁打, 打点, 盗塁, 四球, 死球, 三振, 犠打, 併殺打, 長打率, 出塁率, OPS, RC27, XR27 FROM ds1""")
+    csResult shouldBe a[Success[_]]
+    csResult.get._1 shouldBe 200
+    csResult.get._2 \ "result" shouldBe JString("CREATE STREAM")
+
+    val umStmt = """UPDATE MODEL test USING update_row FROM ds2"""
+    val umResult = sendJubaQL(umStmt)
+    umResult shouldBe a[Success[_]]
+
+    val spResult = sendJubaQL("START PROCESSING ds1")
+    spResult shouldBe a[Success[_]]
+    waitUntilDone("ds1", 6000)
+
+    val aStmt =  """ANALYZE '荻野貴司ABC' BY MODEL test USING complete_row_from_id"""
+    val aResult = sendJubaQL(aStmt)
+    val aStmt2 =  """ANALYZE '荻野貴司' BY MODEL test USING complete_row_from_id"""
+    val aResult2 = sendJubaQL(aStmt2)
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+
+    // now check the result
+    aResult shouldBe a[Success[_]]
+    if (aResult.get._1 != 200)
+      println(stdout.toString)
+    aResult.get._1 shouldBe 200
+    aResult.get._2 \ "result" \ "num_values" match {
+      case JObject(list) =>
+        val vals = list.collect({
+          case (s, JDouble(j)) => (s, j)
+        }).toMap
+        vals.size shouldBe 18
+      case _ =>
+        fail("there was no 'num_values' key")
+    }
+    aResult2 shouldBe a[Success[_]]
+    if (aResult2.get._1 != 200)
+      println(stdout.toString)
+    aResult2.get._1 shouldBe 200
+    aResult2.get._2 \ "result" \ "num_values" match {
+      case JObject(list) =>
+        val vals = list.collect({
+          case (s, JDouble(j)) => (s, j)
+        }).toMap
+
+        vals.size shouldBe 0
+      case _ =>
+        fail("there was no 'num_values' key")
+    }
+    // wait until shutdown
+    val exitValue = process.exitValue()
+    exitValue shouldBe 0
+  }
+
+  it should "recommender use error function" taggedAs (LocalTest, JubatusTest) in {
+    val cfResult = sendJubaQL(
+      """CREATE FUNCTION addABC(name string, team string) RETURNS string LANGUAGE JavaScript AS $$
+        |if (team == '巨人') {
+        |  return name + "ABC";
+        |} else {
+        |  throw new Error("Error Message");
+        |}
+        |$$
+      """.stripMargin)
+    cfResult shouldBe a[Success[_]]
+    cfResult.get._1 shouldBe 200
+    cfResult.get._2 \ "result" shouldBe JString("CREATE FUNCTION")
+
+    val cmStmt = """CREATE DATASOURCE ds1 (id string, team string, 打率 numeric, 試合数 numeric, 打席 numeric, 打数 numeric, 安打 numeric, 本塁打 numeric, 打点 numeric, 盗塁 numeric, 四球 numeric, 死球 numeric, 三振 numeric, 犠 打 numeric, 併殺打 numeric, 長打率 numeric, 出塁率 numeric, OPS numeric, RC27 numeric, XR27 numeric) FROM (STORAGE: "file://src/test/resources/npb_similar_player_data.json")"""
+    val cmResult = sendJubaQL(cmStmt)
+    cmResult shouldBe a[Success[_]]
+
+    val config = Source.fromFile("src/test/resources/npb_similar_player.json").getLines().mkString("")
+    val cdStmt = s"""CREATE RECOMMENDER MODEL test (id: id) AS team WITH unigram, * WITH id CONFIG '$config'"""
+    val cdResult = sendJubaQL(cdStmt)
+    cdResult shouldBe a[Success[_]]
+
+    val csResult = sendJubaQL("""CREATE STREAM ds2 FROM SELECT addABC(id, team) AS id, team, 打率, 試合数, 打席, 打数, 安打, 本塁打, 打点, 盗塁, 四球, 死球, 三振, 犠打, 併殺打, 長打率, 出塁率, OPS, RC27, XR27 FROM ds1""")
+    csResult shouldBe a[Success[_]]
+    csResult.get._1 shouldBe 200
+    csResult.get._2 \ "result" shouldBe JString("CREATE STREAM")
+
+    val umStmt = """UPDATE MODEL test USING update_row FROM ds2"""
+    val umResult = sendJubaQL(umStmt)
+    umResult shouldBe a[Success[_]]
+
+    val spResult = sendJubaQL("START PROCESSING ds1")
+    spResult shouldBe a[Success[_]]
+    waitUntilDone("ds1", 6000)
+
+    val aStmt =  """ANALYZE '阿部慎之助ABC' BY MODEL test USING complete_row_from_id"""
+    val aResult = sendJubaQL(aStmt)
+    val aStmt2 =  """ANALYZE '内川聖一ABC' BY MODEL test USING complete_row_from_id"""
+    val aResult2 = sendJubaQL(aStmt2)
+    // shut down
+    val sdResult = sendJubaQL("SHUTDOWN")
+    sdResult shouldBe a[Success[_]]
+
+    // now check the result
+    aResult shouldBe a[Success[_]]
+    if (aResult.get._1 != 200)
+      println(stdout.toString)
+    aResult.get._1 shouldBe 200
+    aResult.get._2 \ "result" \ "num_values" match {
+      case JObject(list) =>
+        val vals = list.collect({
+          case (s, JDouble(j)) => (s, j)
+        }).toMap
+        vals.size shouldBe 18
+      case _ =>
+        fail("there was no 'num_values' key")
+    }
+    aResult2 shouldBe a[Success[_]]
+    if (aResult2.get._1 != 200)
+      println(stdout.toString)
+    aResult2.get._1 shouldBe 200
+    aResult2.get._2 \ "result" \ "num_values" match {
+      case JObject(list) =>
+        val vals = list.collect({
+          case (s, JDouble(j)) => (s, j)
+        }).toMap
+
+        vals.size shouldBe 0
+      case _ =>
+        fail("there was no 'num_values' key")
     }
     // wait until shutdown
     val exitValue = process.exitValue()

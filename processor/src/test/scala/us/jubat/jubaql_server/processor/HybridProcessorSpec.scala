@@ -23,6 +23,7 @@ import org.apache.spark.sql.catalyst.types._
 import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.{SparkContext, SparkException}
 import org.scalatest._
+import scala.collection.mutable.LinkedHashMap
 
 class HybridProcessorSpec
   extends FlatSpec
@@ -98,6 +99,39 @@ class HybridProcessorSpec
     a[RuntimeException] should be thrownBy {
       processor.startJValueProcessing(rdd => rdd.count)
     }
+  }
+
+  "getStatus()" should "return datasource status for local files" taggedAs (LocalTest) in {
+    val inPath = "file://src/test/resources/dummydata"
+    val processor = new HybridProcessor(sc, sqlc, inPath, Nil)
+    var status = processor.getStatus()
+
+    // Initialized
+    status.get("state") shouldBe Some("Initialized")
+
+    status.get("storage") match {
+      case Some(storage) =>
+        val storageMap: LinkedHashMap[String, Any] = storage.asInstanceOf[LinkedHashMap[String, Any]]
+        storageMap.get("path") shouldBe Some(inPath)
+      case _ => fail()
+    }
+
+    status.get("stream") match {
+      case Some(stream) =>
+        val streamMap: LinkedHashMap[String, Any] = stream.asInstanceOf[LinkedHashMap[String, Any]]
+        streamMap.get("path") shouldBe Some(List())
+      case _ => fail()
+    }
+
+    // Running
+    processor.startJValueProcessing(rdd => rdd.count)
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Running")
+
+    // Finished
+    processor.awaitTermination()
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Finished")
   }
 
   override def afterAll = {
@@ -185,6 +219,39 @@ class HDFSStreamSpec
     streamInfo.itemCount shouldBe 0L
     streamInfo.runtime shouldBe 0L
     streamInfo.maxId shouldBe empty
+  }
+
+  "getStatus()" should "return datasource status for hdfs files" taggedAs (HDFSTest) in {
+    val inPath = "hdfs:///user/empty"
+    val processor = new HybridProcessor(sc, sqlc, inPath, Nil)
+    var status = processor.getStatus()
+
+    // Initialized
+    status.get("state") shouldBe Some("Initialized")
+
+    status.get("storage") match {
+      case Some(storage) =>
+        val storageMap: LinkedHashMap[String, Any] = storage.asInstanceOf[LinkedHashMap[String, Any]]
+        storageMap.get("path") shouldBe Some(inPath)
+      case _ => fail()
+    }
+
+    status.get("stream") match {
+      case Some(stream) =>
+        val streamMap: LinkedHashMap[String, Any] = stream.asInstanceOf[LinkedHashMap[String, Any]]
+        streamMap.get("path") shouldBe Some(List())
+      case _ => fail()
+    }
+
+    // Running
+    processor.startJValueProcessing(rdd => rdd.count)
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Running")
+
+    // Finished
+    processor.awaitTermination()
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Finished")
   }
 
   override def afterAll = {
@@ -304,6 +371,42 @@ class KafkaStreamSpec
     streamInfo.itemCount shouldBe 0L
     streamInfo.runtime should be > 0L
     streamInfo.maxId shouldBe empty
+  }
+
+  "getStatus()" should "return datasource status for stream" taggedAs (KafkaTest) in {
+    val inPath = s"kafka://$kafkaPath/dummy/1"
+    val processor = new HybridProcessor(sc, sqlc, "empty", inPath :: Nil)
+    var status = processor.getStatus()
+
+    // Initialized
+    status.get("state") shouldBe Some("Initialized")
+
+    status.get("storage") match {
+      case Some(storage) =>
+        val storageMap: LinkedHashMap[String, Any] = storage.asInstanceOf[LinkedHashMap[String, Any]]
+        storageMap.get("path") shouldBe Some("empty")
+      case _ => fail()
+    }
+
+    status.get("stoream") match {
+      case Some(stream) =>
+        val streamMap: LinkedHashMap[String, Any] = stream.asInstanceOf[LinkedHashMap[String, Any]]
+        streamMap.get("path") shouldBe Some(List(inPath))
+      case _ => fail()
+    }
+
+    // Running
+    val stopFun = processor.startJValueProcessing(rdd => rdd.count)._1
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Running")
+
+    Thread.sleep(1700) // if we stop during the first batch, something goes wrong
+    val (staticInfo, streamInfo) = stopFun()
+
+    // Finished
+    processor.awaitTermination()
+    status = processor.getStatus()
+    status.get("state") shouldBe Some("Finished")
   }
 
   override def afterAll = {

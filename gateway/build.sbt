@@ -20,8 +20,14 @@ libraryDependencies ++= Seq(
   "net.databinder.dispatch"    %% "dispatch-core"  % "0.11.2",
   // parsing of program arguments
   "com.github.scopt"           %% "scopt"          % "3.2.0",
+  // apache curator
+  "org.apache.curator" % "apache-curator" % "2.8.0",
+  "org.apache.curator" % "curator-framework" % "2.8.0",
+  "org.apache.curator" % "curator-recipes" % "2.8.0",
   // testing
-  "org.scalatest"     %% "scalatest"               % "2.2.1"
+  "org.scalatest"     %% "scalatest"               % "2.2.1",
+  "org.apache.curator" % "curator-test" % "2.8.0",
+  "org.scala-lang.modules" %% "scala-async" % "0.9.2"
 )
 
 // disable parallel test execution to avoid BindException when mocking

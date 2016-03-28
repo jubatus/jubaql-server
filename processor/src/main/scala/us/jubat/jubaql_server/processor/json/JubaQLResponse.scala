@@ -15,6 +15,8 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 package us.jubat.jubaql_server.processor.json
 
+import scala.collection.Map
+
 // We use a sealed trait to make sure we have all possible
 // response types in *this* file.
 sealed trait JubaQLResponse
@@ -26,6 +28,11 @@ case class AnalyzeResultWrapper(result: AnalyzeResult)
   extends JubaQLResponse
 
 case class StatusResponse(result: String,
-  sources: Map[String, String],
-  models: Map[String, String])
+  sources: Map[String, Any],
+  models: Map[String, Any],
+  processor: Map[String, Any],
+  streams: Map[String, Map[String, Any]])
+
   extends JubaQLResponse
+
+case class ShowResponse(result: Map[String, Any]) extends JubaQLResponse

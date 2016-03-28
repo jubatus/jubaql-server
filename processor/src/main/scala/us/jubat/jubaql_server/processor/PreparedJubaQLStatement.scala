@@ -32,7 +32,8 @@ case class PreparedUpdate(modelName: String,
 
 case class PreparedCreateStreamFromSelect(streamName: String,
                               selectPlan: LogicalPlan,
-                              usedTables: List[String]) extends PreparedJubaQLStatement {
+                              usedTables: List[String],
+                              selectString: String) extends PreparedJubaQLStatement {
   override def toString: String = {
     "PreparedCreateStreamFromSelect(%s,<SELECT ...>,%s)".format(streamName, usedTables)
   }
@@ -55,6 +56,7 @@ case class PreparedCreateStreamFromSlidingWindow(streamName: String,
                                                  source: LogicalPlan,
                                                  funcSpecs: List[SomeAggregateFunction[_]],
                                                  outSchema: StructType,
-                                                 postCond: Option[Expression]) extends PreparedJubaQLStatement
+                                                 postCond: Option[Expression],
+                                                 functionString: String) extends PreparedJubaQLStatement
 
 case class PreparedLogStream(streamName: String) extends PreparedJubaQLStatement

@@ -40,7 +40,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS * WITH id CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -62,7 +62,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
       """CREATE CLASSIFIER MODEL test1 (label: label) AS * WITH func CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
     // when submitted via service.processStmt this will already fail earlier
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -85,7 +85,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS hoge WITH square_root CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -105,7 +105,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS foo WITH unigram CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -128,7 +128,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS foo WITH unigram, bar WITH bigram CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -164,7 +164,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS hoge WITH square_root, foo WITH unigram, * CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -198,7 +198,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS hoge WITH square_root, hoge CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -228,7 +228,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS (hoge, foo) WITH repeat CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -265,7 +265,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS (hoge, foo) WITH repeat, hoge WITH square_root, * CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -296,7 +296,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS hoge WITH stats CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -317,7 +317,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS h* CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -338,7 +338,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS *e CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -368,7 +368,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS h* WITH square_root, * CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -399,7 +399,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     val cmStmt =
       """CREATE CLASSIFIER MODEL test1 (label: label) AS h* WITH square_root, *e CONFIG
         |'{"method": "AROW", "parameter": {"regularization_weight" : 1.0}}'""".stripMargin
-    val parsedStmt = service.parseStmt(cmStmt).right.get
+    val parsedStmt = service.parseStmt(cmStmt).right.get._1
     parsedStmt shouldBe a[CreateModel]
     val cm = parsedStmt.asInstanceOf[CreateModel]
     // extract datum from input data
@@ -419,7 +419,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
   class JubaQLServiceTester(sc: SparkContext) extends JubaQLService(sc, RunMode.Development, "file:///tmp/spark") {
     // parses a JubaQL statement and returns the corresponding AST subclass
     // on success
-    def parseStmt(s: String): Either[(Int, String), JubaQLAST] = {
+    def parseStmt(s: String): Either[(Int, String), (JubaQLAST, String)] = {
       logger.debug("request body: %s".format(s))
       val command = Some(compact(render(JObject("query" -> JString(s)))))
       val parsedCommand = command.map(parseJson)
@@ -431,7 +431,7 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     def processStmt(s: String): Either[(Int, String), (JubaQLAST, JubaQLResponse)] = {
       val parsedCommand = Some(parseStmt(s))
       val actionResult = parsedCommand.map(_.right.flatMap(cmd => {
-        takeAction(cmd).right.map((cmd, _))
+        takeAction(cmd._1, cmd._2).right.map((cmd._1, _))
       }))
       actionResult.getOrElse(Left((500, "error")))
     }
@@ -439,7 +439,11 @@ with ShouldMatchers with EitherValues with BeforeAndAfterAll {
     // this creates a JSON configuration string for Jubatus as
     // computed from a CREATE MODEL statement
     def jubatusJsonConfig(cm: CreateModel): Either[(Int, String), String] = {
-      complementInputJson(cm.configJson).right.map(j => pretty(render(j)))
+      val jsonString = cm.jubatusConfigJsonOrPath match {
+        case Left(jsonString) => jsonString
+        case Right(file) => readConfigFile(file)
+      }
+      complementInputJson(jsonString).right.map(j => pretty(render(j)))
     }
 
     // returns the logger used by the JubaQLService

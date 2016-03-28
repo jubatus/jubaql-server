@@ -25,6 +25,10 @@ import unfiltered.util.RunnableServer
 
 import scala.collection.JavaConversions._
 import scala.util.Success
+import org.scalatest.exceptions.TestFailedException
+import javax.script.ScriptException
+import scala.util.Failure
+import scala.collection._
 
 class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
   protected var wiser: Wiser = null
@@ -33,8 +37,8 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
   "JavaScript" should "allow simple functions" taggedAs (LocalTest) in {
     val body = "return x;"
     val funcBody = funcBodyTmpl.format(body)
-    val resultOpt = JavaScriptUDFManager.registerAndTryCall[Double]("test",
-      1, funcBody, Double.box(17.0))
+    val resultOpt = JavaScriptUDFManager.registerAndTryCall[Double](FunctionType.Function, "test",
+      1, funcBody, None, Double.box(17.0))
     resultOpt shouldBe a[Success[_]]
     resultOpt.foreach(result => {
       result shouldBe 17.0
@@ -47,8 +51,8 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
         |return jql.test();
       """.stripMargin
     val funcBody = funcBodyTmpl.format(body)
-    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String]("test",
-      0, funcBody)
+    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String](FunctionType.Function, "test",
+      0, funcBody, None)
     resultOpt shouldBe a[Success[_]]
     resultOpt.foreach(result => {
       result shouldBe "test"
@@ -66,8 +70,8 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
         |  return result.get();
       """.stripMargin
     val funcBody = funcBodyTmpl.format(body)
-    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String]("test",
-      0, funcBody)
+    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String](FunctionType.Function, "test",
+      0, funcBody, None)
     resultOpt shouldBe a[Success[_]]
     resultOpt.foreach(result => {
       result shouldBe "thanks for your GET"
@@ -86,8 +90,8 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
         |  return result.get();
       """.stripMargin
     val funcBody = funcBodyTmpl.format(body)
-    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String]("test",
-      0, funcBody)
+    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String](FunctionType.Function, "test",
+      0, funcBody, None)
     resultOpt shouldBe a[Success[_]]
     resultOpt.foreach(result => {
       result shouldBe "thanks for your GET with msg 'こんにちは'"
@@ -105,13 +109,15 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
         |  return result.get();
       """.stripMargin
     val funcBody = funcBodyTmpl.format(body)
+    val cores = Runtime.getRuntime().availableProcessors();
     // up to 8 requests are processed in parallel, the 9th is
     // executed later (seems like 8 is the thread pool limit for
     // either dispatch or unfiltered)
-    val loop = (1 to 8).toList.par
+    // modify: get number of cores
+    val loop = (1 to cores).toList.par
     val startTime = System.currentTimeMillis()
     val resultOpts = loop.map(_ => {
-      JavaScriptUDFManager.registerAndTryCall[String]("test", 0, funcBody)
+      JavaScriptUDFManager.registerAndTryCall[String](FunctionType.Function, "test", 0, funcBody, None)
     }).seq
     val endTime = System.currentTimeMillis()
     val duration = endTime - startTime
@@ -136,8 +142,8 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
         |  return result.get();
       """.stripMargin
     val funcBody = funcBodyTmpl.format(body)
-    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String]("test",
-      0, funcBody)
+    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String](FunctionType.Function, "test",
+      0, funcBody, None)
     resultOpt shouldBe a[Success[_]]
     resultOpt.foreach(result => {
       result shouldBe "thanks for your POST"
@@ -157,8 +163,8 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
         |  return result.get();
       """.stripMargin
     val funcBody = funcBodyTmpl.format(body)
-    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String]("test",
-      0, funcBody)
+    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String](FunctionType.Function, "test",
+      0, funcBody, None)
     resultOpt shouldBe a[Success[_]]
     resultOpt.foreach(result => {
       result should startWith("thanks for your POST with body:")
@@ -178,8 +184,8 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
         |  return result.get();
       """.stripMargin
     val funcBody = funcBodyTmpl.format(body)
-    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String]("test",
-      0, funcBody)
+    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String](FunctionType.Function, "test",
+      0, funcBody, None)
     resultOpt shouldBe a[Success[_]]
     resultOpt.foreach(result => {
       result shouldBe "thanks for your POST with msg 'こんにちは'"
@@ -195,8 +201,8 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
         |  "Just testing email. よろしく。");
       """.stripMargin
     val funcBody = funcBodyTmpl.format(body)
-    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String]("test",
-      0, funcBody)
+    val resultOpt = JavaScriptUDFManager.registerAndTryCall[String](FunctionType.Function, "test",
+      0, funcBody, None)
     resultOpt shouldBe a[Success[_]]
     wiser.getMessages should not be empty
     val msg = wiser.getMessages.head
@@ -205,6 +211,89 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
     mime.getAllRecipients.head.toString shouldBe "root@localhost"
     mime.getSubject shouldBe "こんにちは"
     mime.getContent.toString should include("よろしく")
+  }
+
+  it should "registerAndCall: allow simple functions" taggedAs (LocalTest) in {
+    val body = "return x;"
+    val funcBody = funcBodyTmpl.format(body)
+    val result = JavaScriptUDFManager.registerAndCall[Double](FunctionType.Function, "test",
+      1, funcBody, None, Double.box(17.0))
+    result shouldBe 17.0
+  }
+
+  it should "registerAndTryCall: allow simple functions" taggedAs (LocalTest) in {
+    val body = "return x;"
+    val funcBody = funcBodyTmpl.format(body)
+    val resultTry = JavaScriptUDFManager.registerAndTryCall[Double](FunctionType.Function, "test",
+      1, funcBody, None, Double.box(17.0))
+    resultTry shouldBe a[Success[_]]
+    resultTry.foreach(result => {
+      result shouldBe 17.0
+    })
+  }
+
+  it should "registerAndOptionCall: allow simple functions" taggedAs (LocalTest) in {
+    val body = "return x;"
+    val funcBody = funcBodyTmpl.format(body)
+    val resultOpt = JavaScriptUDFManager.registerAndOptionCall[Double](FunctionType.Function, "test",
+      1, funcBody, None, Double.box(17.0))
+    resultOpt shouldBe a[Some[_]]
+    resultOpt.foreach(result => {
+      result shouldBe 17.0
+    })
+  }
+
+  "JavaScript throws Exception" should "registerAndCall(args = 1) throw Exception" taggedAs (LocalTest) in {
+    val body = "throw new Error('error Message');"
+    val funcBody = funcBodyTmpl.format(body)
+    try {
+      val result = JavaScriptUDFManager.registerAndCall[Double](FunctionType.Function, "test",
+        1, funcBody, None, Double.box(17.0))
+      fail()
+    } catch {
+      case e: TestFailedException =>
+        e.printStackTrace()
+        fail()
+      case e: Exception =>
+        // invoke methodの出力メッセージ確認
+        e.getMessage should startWith("Failed to invoke function. functionName: test, args: WrappedArray(17.0)")
+    }
+  }
+
+  it should "registerAndCall(args = 0) throw Exception" taggedAs (LocalTest) in {
+    val body = "throw new Error('error Message');"
+    val funcBody = funcBodyTmpl.format(body)
+    try {
+      val result = JavaScriptUDFManager.registerAndCall[Double](FunctionType.Function, "test",
+        0, funcBody, None)
+      fail()
+    } catch {
+      case e: TestFailedException =>
+        e.printStackTrace()
+        fail()
+      case e: Exception =>
+        // invoke methodの出力メッセージ確認(パラメータなし)
+        e.getMessage should startWith("Failed to invoke function. functionName: test, args: WrappedArray()")
+    }
+  }
+
+  it should "registerAndTryCall return Failure" taggedAs (LocalTest) in {
+    val body = "throw new Error('error Message');"
+    val funcBody = funcBodyTmpl.format(body)
+    val resultTry = JavaScriptUDFManager.registerAndTryCall[Double](FunctionType.Function, "test",
+      1, funcBody, None, Double.box(17.0))
+    resultTry shouldBe a[Failure[_]]
+    resultTry.foreach(result => {
+      result shouldBe "Failed to invoke function. functionName: test, args: WrappedArray(17.0)"
+    })
+  }
+
+  it should "registerAndOptionCall return None" taggedAs (LocalTest) in {
+    val body = "throw new Error('error Message');"
+    val funcBody = funcBodyTmpl.format(body)
+    val resultTry = JavaScriptUDFManager.registerAndOptionCall[Double](FunctionType.Function, "test",
+      1, funcBody, None, Double.box(17.0))
+    resultTry shouldBe None
   }
 
   // this server mocks the gateway
@@ -248,6 +337,181 @@ class JavaScriptSpec extends FlatSpec with ShouldMatchers with MockServer {
         case _ =>
           NotFound ~> ResponseString("404")
       })
+  }
+
+  "getFunctions" should "register count is 0 for Function" taggedAs (LocalTest) in {
+    val UDFManager = new JavaScriptUDFManager
+
+    val funcMap = UDFManager.getFunctions(FunctionType.Function)
+    funcMap.isEmpty shouldBe true
+  }
+
+  it should "register count is 1 for Function" taggedAs (LocalTest) in {
+    val UDFManager = new JavaScriptUDFManager
+
+    val body = "function id(arg) { return arg; }"
+    UDFManager.register(FunctionType.Function, "id", 1, body, Some("string"))
+
+    val funcMap = UDFManager.getFunctions(FunctionType.Function)
+    funcMap.size shouldBe 1
+    funcMap.keys.head shouldBe "id"
+    val valueMap = funcMap.get("id").get.asInstanceOf[Map[String, Any]]
+    valueMap.size shouldBe 2
+    valueMap.get("return_type").isDefined shouldBe true
+    valueMap.get("return_type").get shouldBe Some("string")
+    valueMap.get("func_body").isDefined shouldBe true
+    valueMap.get("func_body").get shouldBe body
+  }
+
+  it should "register count is 2 for Function" taggedAs (LocalTest) in {
+    val UDFManager = new JavaScriptUDFManager
+
+    val body1 = "function id(arg) { return arg; }"
+    UDFManager.register(FunctionType.Function, "id", 1, body1, Some("string"))
+    val body2 = "function id2(arg) { return arg; }"
+    UDFManager.register(FunctionType.Function, "id2", 1, body2, Some("string"))
+
+    val funcMap = UDFManager.getFunctions(FunctionType.Function)
+    funcMap.size shouldBe 2
+    funcMap.get("id").isDefined shouldBe true
+    var valueMap = funcMap.get("id").get.asInstanceOf[Map[String, Any]]
+    valueMap.size shouldBe 2
+    valueMap.get("return_type").isDefined shouldBe true
+    valueMap.get("return_type").get shouldBe Some("string")
+    valueMap.get("func_body").isDefined shouldBe true
+    valueMap.get("func_body").get shouldBe body1
+
+    funcMap.get("id2").isDefined shouldBe true
+    valueMap = funcMap.get("id2").get.asInstanceOf[Map[String, Any]]
+    valueMap.size shouldBe 2
+    valueMap.get("return_type").isDefined shouldBe true
+    valueMap.get("return_type").get shouldBe Some("string")
+    valueMap.get("func_body").isDefined shouldBe true
+    valueMap.get("func_body").get shouldBe body2
+  }
+
+  it should "register count is 0 for Trigger Function" taggedAs (LocalTest) in {
+    val UDFManager = new JavaScriptUDFManager
+
+    val funcMap = UDFManager.getFunctions(FunctionType.Trigger)
+    funcMap.isEmpty shouldBe true
+  }
+
+  it should "register count is 1 for Trigger Function" taggedAs (LocalTest) in {
+    val UDFManager = new JavaScriptUDFManager
+
+    val body = "function printLines(n, label) {  var i = 0;  while (i < n) { println(label); i = i + 1; }  }"
+    UDFManager.register(FunctionType.Trigger, "printLines", 2, body, None)
+
+    val funcMap = UDFManager.getFunctions(FunctionType.Trigger)
+    funcMap.size shouldBe 1
+    funcMap.keys.head shouldBe "printLines"
+    val valueMap = funcMap.get("printLines").get.asInstanceOf[Map[String, Any]]
+    valueMap.size shouldBe 2
+    valueMap.get("return_type").isDefined shouldBe true
+    valueMap.get("return_type").get shouldBe None
+    valueMap.get("func_body").isDefined shouldBe true
+    valueMap.get("func_body").get shouldBe body
+  }
+
+  it should "register count is 2 for Trigger Function" taggedAs (LocalTest) in {
+    val UDFManager = new JavaScriptUDFManager
+
+    val body1 = "function printLines(n, label) {  var i = 0;  while (i < n) { println(label); i = i + 1; }  }"
+    UDFManager.register(FunctionType.Trigger, "printLines", 2, body1, None)
+    val body2 = "function printLines2(n, label) {  var i = 0;  while (i < n) { println(label); i = i + 1; }  }"
+    UDFManager.register(FunctionType.Trigger, "printLines2", 2, body2, None)
+
+    val funcMap = UDFManager.getFunctions(FunctionType.Trigger)
+    funcMap.size shouldBe 2
+    funcMap.get("printLines").isDefined shouldBe true
+    var valueMap = funcMap.get("printLines").get.asInstanceOf[Map[String, Any]]
+    valueMap.size shouldBe 2
+    valueMap.get("return_type").isDefined shouldBe true
+    valueMap.get("return_type").get shouldBe None
+    valueMap.get("func_body").isDefined shouldBe true
+    valueMap.get("func_body").get shouldBe body1
+
+    funcMap.get("printLines2").isDefined shouldBe true
+    valueMap = funcMap.get("printLines2").get.asInstanceOf[Map[String, Any]]
+    valueMap.size shouldBe 2
+    valueMap.get("return_type").isDefined shouldBe true
+    valueMap.get("return_type").get shouldBe None
+    valueMap.get("func_body").isDefined shouldBe true
+    valueMap.get("func_body").get shouldBe body2
+  }
+
+  it should "register count is 0 for Feature Function" taggedAs (LocalTest) in {
+    val UDFManager = JavaScriptFeatureFunctionManager
+
+    val funcMap = UDFManager.getFunctions(FunctionType.Feature)
+    funcMap.isEmpty shouldBe true
+  }
+
+  it should "register count is 1 for Feature Function" taggedAs (LocalTest) in {
+    val UDFManager = JavaScriptFeatureFunctionManager
+
+    val body = "function printLines(label) {  println(label); }"
+    UDFManager.register("printLines", 2, body)
+
+    val funcMap = UDFManager.getFunctions(FunctionType.Feature)
+    funcMap.size shouldBe 1
+    funcMap.keys.head shouldBe "printLines"
+    val valueMap = funcMap.get("printLines").get.asInstanceOf[Map[String, Any]]
+    valueMap.size shouldBe 2
+    valueMap.get("return_type").isDefined shouldBe true
+    valueMap.get("return_type").get shouldBe None
+    valueMap.get("func_body").isDefined shouldBe true
+    valueMap.get("func_body").get shouldBe body
+  }
+
+  it should "register count is 2 for Feature Function" taggedAs (LocalTest) in {
+    val UDFManager = JavaScriptFeatureFunctionManager
+
+    val body1 = "function printLines(label) {  println(label); }"
+    UDFManager.register("printLines", 2, body1)
+    val body2 = "function printLines2(label) {  println(label); }"
+    UDFManager.register("printLines2", 2, body2)
+
+    val funcMap = UDFManager.getFunctions(FunctionType.Feature)
+    funcMap.size shouldBe 2
+    funcMap.get("printLines").isDefined shouldBe true
+    var valueMap = funcMap.get("printLines").get.asInstanceOf[Map[String, Any]]
+    valueMap.size shouldBe 2
+    valueMap.get("return_type").isDefined shouldBe true
+    valueMap.get("return_type").get shouldBe None
+    valueMap.get("func_body").isDefined shouldBe true
+    valueMap.get("func_body").get shouldBe body1
+
+    funcMap.get("printLines2").isDefined shouldBe true
+    valueMap = funcMap.get("printLines2").get.asInstanceOf[Map[String, Any]]
+    valueMap.size shouldBe 2
+    valueMap.get("return_type").isDefined shouldBe true
+    valueMap.get("return_type").get shouldBe None
+    valueMap.get("func_body").isDefined shouldBe true
+    valueMap.get("func_body").get shouldBe body2
+  }
+
+  it should "register mix for Function/Trigger Function" taggedAs (LocalTest) in {
+    val UDFManager = new JavaScriptUDFManager
+
+    val body1 = "function id(arg) { return arg; }"
+    UDFManager.register(FunctionType.Function, "id", 1, body1, Some("string"))
+
+    val body2 = "function id2(arg) { return arg; }"
+    UDFManager.register(FunctionType.Function, "id2", 1, body2, Some("string"))
+
+    val body3 = "function printLines(n, label) {  var i = 0;  while (i < n) { println(label); i = i + 1; }  }"
+    UDFManager.register(FunctionType.Trigger, "printLines", 2, body3, None)
+
+    var funcMap = UDFManager.getFunctions(FunctionType.Function)
+    funcMap.size shouldBe 2
+
+    funcMap = UDFManager.getFunctions(FunctionType.Trigger)
+    funcMap.size shouldBe 1
+
+    funcMap = UDFManager.getFunctions(FunctionType.Feature)
+    funcMap.size shouldBe 0
   }
 
   override protected def beforeAll(): Unit = {

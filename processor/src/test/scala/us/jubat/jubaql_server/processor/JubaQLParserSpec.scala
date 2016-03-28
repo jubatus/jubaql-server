@@ -21,6 +21,8 @@ import org.apache.spark.sql.catalyst.plans.logical.Filter
 import org.scalatest.FlatSpec
 import org.scalatest.Matchers._
 
+import java.net.URI
+
 /* This test case tests only that the parser recognizes the syntax
  * that was defined for JubaQL correctly. It does not test the
  * functionality that was defined for each statement.
@@ -103,7 +105,7 @@ class JubaQLParserSpec extends FlatSpec {
     // use single quotation
     val result: Option[JubaQLAST] = parser.parse(
       """
-      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH id CONFIG '{"test": 123}'
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}'
       """.stripMargin
     )
 
@@ -112,8 +114,9 @@ class JubaQLParserSpec extends FlatSpec {
     create.algorithm shouldBe "CLASSIFIER"
     create.modelName shouldBe "test1"
     create.labelOrId shouldBe Some(("label", "l"))
-    create.featureExtraction shouldBe List((WildcardAnyParameter, "id"))
-    create.configJson shouldBe """{"test": 123}"""
+    create.featureExtraction shouldBe List((WildcardAnyParameter, "fex"))
+    create.jubatusConfigJsonOrPath.isLeft shouldBe true
+    create.jubatusConfigJsonOrPath.left.get shouldBe """{"test": 123}"""
     //create.specifier shouldBe List(("id", List("id")), ("datum", List("a", "b")))
   }
 
@@ -122,7 +125,7 @@ class JubaQLParserSpec extends FlatSpec {
     // use single quotation
     val result: Option[JubaQLAST] = parser.parse(
       """
-      |CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH id CONFIG '{"test":
+      |CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test":
       |123}'
       """.stripMargin
     )
@@ -132,8 +135,9 @@ class JubaQLParserSpec extends FlatSpec {
     create.algorithm shouldBe "CLASSIFIER"
     create.modelName shouldBe "test1"
     create.labelOrId shouldBe Some(("label", "l"))
-    create.featureExtraction shouldBe List((WildcardAnyParameter, "id"))
-    create.configJson shouldBe "{\"test\":\n123}"
+    create.featureExtraction shouldBe List((WildcardAnyParameter, "fex"))
+    create.jubatusConfigJsonOrPath.isLeft shouldBe true
+    create.jubatusConfigJsonOrPath.left.get shouldBe "{\"test\":\n123}"
     //create.specifier shouldBe List(("id", List("id")), ("datum", List("a", "b")))
   }
 
@@ -152,7 +156,8 @@ class JubaQLParserSpec extends FlatSpec {
     create.modelName shouldBe "test1"
     create.labelOrId shouldBe Some(("label", "ラベル"))
     create.featureExtraction shouldBe List((NormalParameters("名前" :: Nil), "アイディー"))
-    create.configJson shouldBe """{"test": 123}"""
+    create.jubatusConfigJsonOrPath.isLeft shouldBe true
+    create.jubatusConfigJsonOrPath.left.get shouldBe """{"test": 123}"""
     //create.specifier shouldBe List(("id", List("id")), ("datum", List("a", "b")))
   }
 
@@ -171,8 +176,454 @@ class JubaQLParserSpec extends FlatSpec {
     create.modelName shouldBe "test1"
     create.labelOrId shouldBe Some(("label", "ラベル"))
     create.featureExtraction shouldBe List((WildcardWithPrefixParameter("名前"), "アイディー"))
-    create.configJson shouldBe """{"test": 123}"""
+    create.jubatusConfigJsonOrPath.isLeft shouldBe true
+    create.jubatusConfigJsonOrPath.left.get shouldBe """{"test": 123}"""
     //create.specifier shouldBe List(("id", List("id")), ("datum", List("a", "b")))
+  }
+
+  it should "recognize CREATE MODEL with config file" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG FILE 'file:///tmp/config/jubatusConfig.json'
+      """.stripMargin
+    )
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.algorithm shouldBe "CLASSIFIER"
+    create.modelName shouldBe "test1"
+    create.labelOrId shouldBe Some(("label", "l"))
+    create.featureExtraction shouldBe List((WildcardAnyParameter, "fex"))
+    create.jubatusConfigJsonOrPath.isRight shouldBe true
+    create.jubatusConfigJsonOrPath.right.get shouldBe new URI("file:///tmp/config/jubatusConfig.json")
+  }
+
+  it should "recognize CREATE MODEL with illegal config file" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    try{
+      val result: Option[JubaQLAST] = parser.parse(
+        """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG FILE '{"test": 123}'
+      """.stripMargin)
+      fail()
+    } catch {
+      case e: Exception =>
+        assert(e.isInstanceOf[java.net.URISyntaxException])
+    }
+  }
+
+  it should "recognize CREATE MODEL with CONFIG FILES(wrong query)" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG FILES 'file:///tmp/config/jubatusConfig.json'
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "recognize CREATE MODEL without recource config" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}'
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.resConfigJsonOrPath shouldBe None
+  }
+
+  it should "recognize CREATE MODEL for recource config" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' RESOURCE CONFIG '{"applicationmaster_memory": 256}'
+      """.stripMargin)
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.resConfigJsonOrPath shouldBe Some(Left("""{"applicationmaster_memory": 256}"""))
+  }
+
+  it should "not recognize CREATE MODEL for recource config without value" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    var result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' RESOURCE CONFIG
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "not recognize CREATE MODEL for recource config without 'CONFIG'" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    var result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' RESOURCE '{"applicationmaster_memory": 256}'
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "recognize CREATE MODEL with resource config file" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' RESOURCE CONFIG FILE 'file:///tmp/config/resourceConfig.json'
+      """.stripMargin
+    )
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.algorithm shouldBe "CLASSIFIER"
+    create.modelName shouldBe "test1"
+    create.labelOrId shouldBe Some(("label", "l"))
+    create.featureExtraction shouldBe List((WildcardAnyParameter, "fex"))
+    create.resConfigJsonOrPath shouldNot be(None)
+    create.resConfigJsonOrPath.get.isRight shouldBe true
+    create.resConfigJsonOrPath.get.right.get shouldBe new URI("file:///tmp/config/resourceConfig.json")
+  }
+
+  it should "recognize CREATE MODEL with illegal resource config file" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    try{
+      val result: Option[JubaQLAST] = parser.parse(
+        """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG FILE '{"test": 123}' RESOURCE CONFIG FILE '{"test": 123}'
+      """.stripMargin)
+      fail()
+    } catch {
+      case e: Exception =>
+        assert(e.isInstanceOf[java.net.URISyntaxException])
+    }
+  }
+
+  it should "recognize CREATE MODEL with RESOURCE CONFIG FILES(wrong query)" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' RESOURCE CONFIG FILES 'file:///tmp/config/resourceConfig.json'
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "recognize CREATE MODEL for log config" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' LOG CONFIG '{"yarn_am": "hdfs:///jubatus-on-yarn/test/am_log4j.xml", "jubatus_proxy": "hdfs:///jubatus-on-yarn/test/jp_log4j.xml", "jubatus_server": "hdfs:///jubatus-on-yarn/test/js_log4j.xml"}'
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.logConfigJsonOrPath shouldBe Some(Left("""{"yarn_am": "hdfs:///jubatus-on-yarn/test/am_log4j.xml", "jubatus_proxy": "hdfs:///jubatus-on-yarn/test/jp_log4j.xml", "jubatus_server": "hdfs:///jubatus-on-yarn/test/js_log4j.xml"}"""))
+  }
+
+  it should "recognize CREATE MODEL without log config" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}'
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.logConfigJsonOrPath shouldBe None
+  }
+
+  it should "not recognize CREATE MODEL for log config without 'CONFIG'" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    var result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' LOG '{"yarn_am": "hdfs:///jubatus-on-yarn/test/am_log4j.xml", "jubatus_proxy": "hdfs:///jubatus-on-yarn/test/jp_log4j.xml", "jubatus_server": "hdfs:///jubatus-on-yarn/test/js_log4j.xml"}'
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "recognize CREATE MODEL with log config file" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' LOG CONFIG FILE 'file:///tmp/config/logConfig.json'
+      """.stripMargin
+    )
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.algorithm shouldBe "CLASSIFIER"
+    create.modelName shouldBe "test1"
+    create.labelOrId shouldBe Some(("label", "l"))
+    create.featureExtraction shouldBe List((WildcardAnyParameter, "fex"))
+    create.logConfigJsonOrPath shouldNot be(None)
+    create.logConfigJsonOrPath.get.isRight shouldBe true
+    create.logConfigJsonOrPath.get.right.get shouldBe new URI("file:///tmp/config/logConfig.json")
+  }
+
+  it should "recognize CREATE MODEL with illegal log config file" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    try{
+      val result: Option[JubaQLAST] = parser.parse(
+        """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' LOG CONFIG FILE '{"test": 123}'
+      """.stripMargin)
+      fail()
+    } catch {
+      case e: Exception =>
+        assert(e.isInstanceOf[java.net.URISyntaxException])
+    }
+  }
+
+  it should "recognize CREATE MODEL with LOG CONFIG FILES(wrong query)" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' LOG CONFIG FILES 'file:///tmp/config/logConfig.json'
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "recognize CREATE MODEL without server config" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}'
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.serverConfigJsonOrPath shouldBe None
+  }
+
+  it should "recognize CREATE MODEL for server config" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' SERVER CONFIG '{"thread": 3}'
+      """.stripMargin)
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.serverConfigJsonOrPath shouldBe Some(Left("""{"thread": 3}"""))
+  }
+
+  it should "not recognize CREATE MODEL for server config without value" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    var result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' SERVER CONFIG
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "not recognize CREATE MODEL for server config without 'CONFIG'" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    var result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' SERVER '{"thread": 3}'
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "recognize CREATE MODEL with server config file" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' SERVER CONFIG FILE 'file:///tmp/config/serverConfig.json'
+      """.stripMargin
+    )
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.algorithm shouldBe "CLASSIFIER"
+    create.modelName shouldBe "test1"
+    create.labelOrId shouldBe Some(("label", "l"))
+    create.featureExtraction shouldBe List((WildcardAnyParameter, "fex"))
+    create.serverConfigJsonOrPath shouldNot be(None)
+    create.serverConfigJsonOrPath.get.isRight shouldBe true
+    create.serverConfigJsonOrPath.get.right.get shouldBe new URI("file:///tmp/config/serverConfig.json")
+  }
+
+  it should "recognize CREATE MODEL with illegal server config file" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    try{
+      val result: Option[JubaQLAST] = parser.parse(
+        """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' SERVER CONFIG FILE '{"test": 123}'
+      """.stripMargin)
+      fail()
+    } catch {
+      case e: Exception =>
+        assert(e.isInstanceOf[java.net.URISyntaxException])
+    }
+  }
+
+  it should "recognize CREATE MODEL with SERVER CONFIG FILES(wrong query)" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' SERVER CONFIG FILES 'file:///tmp/config/serverConfig.json'
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "recognize CREATE MODEL without proxy config" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}'
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.proxyConfigJsonOrPath shouldBe None
+  }
+
+  it should "recognize CREATE MODEL for proxy config" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' PROXY CONFIG '{"thread": 3}'
+      """.stripMargin)
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.proxyConfigJsonOrPath shouldBe Some(Left("""{"thread": 3}"""))
+  }
+
+  it should "not recognize CREATE MODEL for proxy config without value" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    var result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' PROXY CONFIG
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "not recognize CREATE MODEL for proxy config without 'CONFIG'" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    var result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' PROXY '{"thread": 3}'
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "recognize CREATE MODEL with proxy config file" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' PROXY CONFIG FILE 'file:///tmp/config/proxyConfig.json'
+      """.stripMargin
+    )
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.algorithm shouldBe "CLASSIFIER"
+    create.modelName shouldBe "test1"
+    create.labelOrId shouldBe Some(("label", "l"))
+    create.featureExtraction shouldBe List((WildcardAnyParameter, "fex"))
+    create.proxyConfigJsonOrPath shouldNot be(None)
+    create.proxyConfigJsonOrPath.get.isRight shouldBe true
+    create.proxyConfigJsonOrPath.get.right.get shouldBe new URI("file:///tmp/config/proxyConfig.json")
+  }
+
+  it should "recognize CREATE MODEL with illegal proxy config file" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    try{
+      val result: Option[JubaQLAST] = parser.parse(
+        """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' PROXY CONFIG FILE '{"test": 123}'
+      """.stripMargin)
+      fail()
+    } catch {
+      case e: Exception =>
+        assert(e.isInstanceOf[java.net.URISyntaxException])
+    }
+  }
+
+  it should "recognize CREATE MODEL with PROXY CONFIG FILES(wrong query)" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"test": 123}' PROXY CONFIG FILES 'file:///tmp/config/proxyConfig.json'
+      """.stripMargin)
+    result shouldBe (None)
+  }
+
+  it should "recognize CREATE MODEL toString with XXX CONFIG" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      |CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"jubatusConfig":"jubatus"}'
+      | RESOURCE CONFIG '{"resourceConfig":"resource"}'
+      | LOG CONFIG '{"logConfig":"log"}'
+      | SERVER CONFIG '{"serverConfig":"server"}'
+      | PROXY CONFIG '{"proxyConfig":"proxy"}'
+      """.stripMargin
+    )
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.toString should include regex  """CreateModel(.*\{"jub\.\.\.tus"\},\{"res\.\.\.rce"\},\{"log\.\.\.log"\},\{"ser\.\.\.ver"\},\{"pro\.\.\.oxy"\}.*)""".r
+  }
+
+  it should "recognize CREATE MODEL toString without XXX CONFIG" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      |CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG '{"jubatusConfig":"jubatus"}'
+      """.stripMargin
+    )
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.toString should include regex  """CreateModel(.*\{"jub\.\.\.tus"\},None,None,None,None.*)""".r
+  }
+
+  it should "recognize CREATE MODEL toString with XXX CONFIG FILE" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    // use single quotation
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      |CREATE CLASSIFIER MODEL test1 (label: l) AS * WITH fex CONFIG FILE 'file:///tmp/config/jubatusConfig.json'
+      | RESOURCE CONFIG FILE 'file:///tmp/config/resourceConfig.json'
+      | LOG CONFIG FILE 'file:///tmp/config/logConfig.json'
+      | SERVER CONFIG FILE 'file:///tmp/config/serverConfig.json'
+      | PROXY CONFIG FILE 'file:///tmp/config/proxyConfig.json'
+      """.stripMargin
+    )
+
+    result shouldNot be(None)
+    val create = result.get.asInstanceOf[CreateModel]
+    create.toString should include regex  "CreateModel(.*file:///tmp/config/jubatusConfig.json,file:///tmp/config/resourceConfig.json,file:///tmp/config/logConfig.json,file:///tmp/config/serverConfig.json,file:///tmp/config/proxyConfig.json.*)"
   }
 
   it should "recognize CREATE STREAM FROM SELECT" taggedAs (LocalTest) in {
@@ -224,7 +675,7 @@ class JubaQLParserSpec extends FlatSpec {
       |  SLIDING WINDOW (SIZE 4 ADVANCE 3 TUPLES)
       |  OVER source
       |  WITH fourier(some_col) AS fourier_coeffs
-      |  WHERE id % 2 = 0
+      |  WHERE fid % 2 = 0
       |  HAVING fourier_coeffs = 2
     """.stripMargin)
     result shouldNot be(None)
@@ -335,6 +786,68 @@ class JubaQLParserSpec extends FlatSpec {
     update.modelName shouldBe "juba_model"
     update.rpcName shouldBe "train"
     update.source shouldBe "source"
+  }
+
+  it should "recognize UPDATE WITH for uppercase" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      UPDATE MODEL juba_model USING train WITH '{"test": 123}'
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val updateWith = result.get.asInstanceOf[UpdateWith]
+    updateWith.modelName shouldBe "juba_model"
+    updateWith.rpcName shouldBe "train"
+    updateWith.learningData shouldBe """{"test": 123}"""
+  }
+
+  it should "recognize UPDATE WITH for lowercase" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      UPDATE MODEL juba_model USING train with '{"test": 123}'
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val updateWith = result.get.asInstanceOf[UpdateWith]
+    updateWith.modelName shouldBe "juba_model"
+    updateWith.rpcName shouldBe "train"
+    updateWith.learningData shouldBe """{"test": 123}"""
+  }
+
+  it should "recognize UPDATE WITH for mixedcase" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      UPDATE MODEL juba_model USING train With '{"test": 123}'
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val updateWith = result.get.asInstanceOf[UpdateWith]
+    updateWith.modelName shouldBe "juba_model"
+    updateWith.rpcName shouldBe "train"
+    updateWith.learningData shouldBe """{"test": 123}"""
+  }
+
+  it should "not recognize UPDATE WITH without with" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      UPDATE MODEL juba_model USING train '{"test": 123}'
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize UPDATE WITH without learningData" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      UPDATE MODEL juba_model USING train WITH
+      """.stripMargin)
+
+    result should be(None)
   }
 
   // TODO write more ANALYZE tests
@@ -456,5 +969,310 @@ class JubaQLParserSpec extends FlatSpec {
     cf.args shouldBe List(("arg", "string"))
     cf.lang shouldBe "JavaScript"
     cf.body shouldBe " var n = 1; return n; "
+  }
+
+  // TODO write more SAVE MODEL tests
+
+  it should "recognize SAVE MODEL for Development Mode" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING "file:///home/data/models" AS test001
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[SaveModel]
+    sm.modelName shouldBe "test"
+    sm.modelPath shouldBe """file:///home/data/models"""
+    sm.modelId shouldBe "test001"
+  }
+
+  it should "recognize SAVE MODEL for Production Mode" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING "hdfs:///data/models" AS id
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[SaveModel]
+    sm.modelName shouldBe "test"
+    sm.modelPath shouldBe """hdfs:///data/models"""
+    sm.modelId shouldBe "id"
+  }
+
+  it should "not recognize SAVE MODEL without ModelName" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL USING "hdfs:///data/models" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize SAVE MODEL ModelName is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL "" USING "hdfs:///data/models" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize SAVE MODEL without ModelPath" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING  AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize SAVE MODEL ModelPath is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING "" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize SAVE MODEL without ModelId" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING "hdfs:///data/models" AS
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize SAVE MODEL ModelId is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      SAVE MODEL test USING "hdfs:///data/models" AS ""
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  // TODO write more LOAD MODEL tests
+
+  it should "recognize LOAD MODEL Development Mode/file:scheme" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING "file:///home/data/models" AS test001
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[LoadModel]
+    sm.modelName shouldBe "test"
+    sm.modelPath shouldBe """file:///home/data/models"""
+    sm.modelId shouldBe "test001"
+  }
+
+  it should "recognize LOAD MODEL Production Mode/hdfs:scheme" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING "hdfs:///data/models" AS id
+      """.stripMargin)
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[LoadModel]
+    sm.modelName shouldBe "test"
+    sm.modelPath shouldBe """hdfs:///data/models"""
+    sm.modelId shouldBe "id"
+  }
+
+  it should "not recognize LOAD MODEL without ModelName" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL USING "hdfs:///data/models" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize LOAD MODEL ModelName is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL "" USING "hdfs:///data/models" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize LOAD MODEL without ModelPath" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING  AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize LOAD MODEL ModelPath is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING "" AS test001
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize LOAD MODEL without ModelId" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING "hdfs:///data/models" AS
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  it should "not recognize LOAD MODEL ModelId is Empty" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse(
+      """
+      LOAD MODEL test USING "hdfs:///data/models" AS ""
+      """.stripMargin)
+
+    result should be(None)
+  }
+
+  // TODO write more SHOW Query tests
+
+  it should "recognize SHOW DATASOURCES" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW DATASOURCES")
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[ShowQuery]
+    sm.queryType shouldBe "datasources"
+  }
+  it should "not recognize SHOW DATASOURCES" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW DATASOURCE")
+    result should be(None)
+  }
+  it should "recognize SHOW MODELS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW MODELS")
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[ShowQuery]
+    sm.queryType shouldBe "models"
+  }
+  it should "not recognize SHOW MODELS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW MODEL")
+    result should be(None)
+  }
+  it should "recognize SHOW SELECT STREAMS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW SELECT STREAMS")
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[ShowQuery]
+    sm.queryType shouldBe "select streams"
+  }
+  it should "not recognize SHOW SELECT STREAMS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW SELECT STREAM")
+    result should be(None)
+  }
+  it should "recognize SHOW ANALYZE STREAMS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW ANALYZE STREAMS")
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[ShowQuery]
+    sm.queryType shouldBe "analyze streams"
+  }
+  it should "not recognize SHOW ANALYZE STREAMS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW ANALYZE STREAM")
+    result should be(None)
+  }
+  it should "recognize SHOW WINDOW STREAMS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW WINDOW STREAMS")
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[ShowQuery]
+    sm.queryType shouldBe "window streams"
+  }
+  it should "not recognize SHOW WINDOW STREAMS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW WINDOW STREAM")
+    result should be(None)
+  }
+  it should "recognize SHOW FUNCTIONS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW FUNCTIONS")
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[ShowQuery]
+    sm.queryType shouldBe "functions"
+  }
+  it should "not recognize SHOW FUNCTIONS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW FUNCTION")
+    result should be(None)
+  }
+  it should "recognize SHOW TRIGGER FUNCTIONS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW TRIGGER FUNCTIONS")
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[ShowQuery]
+    sm.queryType shouldBe "trigger functions"
+  }
+  it should "not recognize SHOW TRIGGER FUNCTIONS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW TRIGGER FUNCTION")
+    result should be(None)
+  }
+  it should "recognize SHOW FEATURE FUNCTIONS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW FEATURE FUNCTIONS")
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[ShowQuery]
+    sm.queryType shouldBe "feature functions"
+  }
+  it should "not recognize SHOW FEATURE FUNCTIONS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW FEATURE FUNCTION")
+    result should be(None)
+  }
+  it should "recognize SHOW TRIGGERS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW TRIGGERS")
+
+    result shouldNot be(None)
+    val sm = result.get.asInstanceOf[ShowQuery]
+    sm.queryType shouldBe "triggers"
+  }
+  it should "not recognize SHOW TRIGGERS" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW TRIGGER")
+    result should be(None)
+  }
+  it should "not recognize SHOW Query" taggedAs (LocalTest) in {
+    val parser = new JubaQLParser
+    val result: Option[JubaQLAST] = parser.parse("SHOW")
+    result should be(None)
   }
 }

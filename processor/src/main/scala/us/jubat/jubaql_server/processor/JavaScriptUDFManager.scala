@@ -20,8 +20,9 @@ import scala.collection.JavaConversions
 import javax.script.{ScriptEngine, ScriptEngineManager, Invocable}
 
 import scala.util.{Failure, Success, Try}
+import com.typesafe.scalalogging.slf4j.LazyLogging
 
-class JavaScriptUDFManager {
+class JavaScriptUDFManager extends LazyLogging {
   // The null is required.
   // See: http://stackoverflow.com/questions/20168226/sbt-0-13-scriptengine-is-null-for-getenginebyname-javascript
   private val scriptEngineManager = new ScriptEngineManager(null)
@@ -30,17 +31,17 @@ class JavaScriptUDFManager {
     override def initialValue() = createScriptEngine()
   }
 
-  private case class Mapped(nargs: Int, funcBody: String, var threadIds: List[Long])
+  private case class Mapped(nargs: Int, funcBody: String, var threadIds: List[Long], funcType: FunctionType, returnType: Option[String])
   private val funcs = new mutable.HashMap[String, Mapped]
 
   // throws javax.script.ScriptException when funcBody is invalid.
-  def register(funcName: String, nargs: Int, funcBody: String): Unit = {
+  def register(funcType: FunctionType, funcName: String, nargs: Int, funcBody: String, returnType: Option[String] = None): Unit = {
     val engine = getScriptEngine()
     val threadId = Thread.currentThread.getId
 
     funcs.synchronized {
       def overwriteFunc(): Unit = {
-        funcs += (funcName -> Mapped(nargs, funcBody, List(threadId)))
+        funcs += (funcName -> Mapped(nargs, funcBody, List(threadId), funcType, returnType))
       }
 
       funcs.get(funcName) match {
@@ -60,10 +61,17 @@ class JavaScriptUDFManager {
 
   private def invoke(funcName: String, args: AnyRef*): AnyRef = {
     val inv = getInvocableEngine()
-    inv.invokeFunction(funcName, args: _*)
+    try {
+      inv.invokeFunction(funcName, args: _*)
+    } catch {
+      case e: Exception =>
+        val errMsg = s"Failed to invoke function. functionName: ${funcName}, args: ${args.toString()}"
+        logger.error(errMsg, e)
+        throw new Exception(errMsg, e)
+    }
   }
 
-  def call[T](funcName: String, args: AnyRef*): Option[T] = {
+  def optionCall[T](funcName: String, args: AnyRef*): Option[T] = {
     Try {
       invoke(funcName, args:_*).asInstanceOf[T]
     } match {
@@ -76,18 +84,45 @@ class JavaScriptUDFManager {
     invoke(funcName, args:_*).asInstanceOf[T]
   }
 
-  def registerAndCall[T](funcName: String, nargs: Int, funcBody: String, args: AnyRef*): Option[T] = {
-    register(funcName, nargs, funcBody)
-    call[T](funcName, args:_*)
+  def call[T](funcName: String, args: AnyRef*): T = {
+    Try {
+      invoke(funcName, args:_*).asInstanceOf[T]
+    } match {
+      case Success(value) => value
+      case Failure(err) =>
+        throw err
+    }
   }
 
-  def registerAndTryCall[T](funcName: String, nargs: Int, funcBody: String, args: AnyRef*): Try[T] = {
-    register(funcName, nargs, funcBody)
+  def registerAndOptionCall[T](funcType: FunctionType, funcName: String, nargs: Int, funcBody: String, returnType: Option[String], args: AnyRef*): Option[T] = {
+    register(funcType, funcName, nargs, funcBody, returnType)
+    optionCall[T](funcName, args:_*)
+  }
+
+  def registerAndTryCall[T](funcType: FunctionType, funcName: String, nargs: Int, funcBody: String, returnType: Option[String], args: AnyRef*): Try[T] = {
+    register(funcType, funcName, nargs, funcBody, returnType)
     tryCall[T](funcName, args:_*)
+  }
+
+  def registerAndCall[T](funcType: FunctionType, funcName: String, nargs: Int, funcBody: String, returnType: Option[String], args: AnyRef*): T = {
+    register(funcType, funcName, nargs, funcBody, returnType)
+    call[T](funcName, args:_*)
   }
 
   def getNumberOfArgsByFunctionName(fname: String): Option[Int] = funcs.synchronized {
     funcs.get(fname).map(_.nargs)
+  }
+
+  def getFunctions(funcType: FunctionType): Map[String, Any] = funcs.synchronized {
+    val funcMapBuilder = Map.newBuilder[String, Any]
+    funcs.foreach {
+      case (funcName, mapped) if (funcType == mapped.funcType) =>
+        funcMapBuilder += funcName -> Map[String, Any]("return_type" -> mapped.returnType, "func_body" -> mapped.funcBody)
+
+      case _ =>
+    }
+
+    funcMapBuilder.result
   }
 
   // This method is required because Rhino may return ConsString (!= java.lang.String)
@@ -120,6 +155,10 @@ class JavaScriptUDFManager {
 object JavaScriptUDFManager extends JavaScriptUDFManager
 
 object JavaScriptFeatureFunctionManager extends JavaScriptUDFManager {
+  def register(funcName: String, nargs: Int, funcBody: String): Unit = {
+    register(FunctionType.Feature, funcName, nargs, funcBody, None)
+  }
+
   def callAndGetValues(funcName: String, args: AnyRef*): Map[String, Any] = {
     tryCall[java.util.Map[String, AnyRef]](funcName, args:_*) match {
       case Success(m) =>
@@ -128,4 +167,11 @@ object JavaScriptFeatureFunctionManager extends JavaScriptUDFManager {
         throw err
     }
   }
+}
+
+sealed abstract class FunctionType(name: String)
+object FunctionType {
+  case object Function extends FunctionType("Function")
+  case object Trigger extends FunctionType("Trigger")
+  case object Feature extends FunctionType("Feature")
 }
